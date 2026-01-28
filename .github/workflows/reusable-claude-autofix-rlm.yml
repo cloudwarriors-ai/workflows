@@ -281,6 +281,11 @@ jobs:
             cp /tmp/org-github/CLAUDE.md ./
           fi
 
+      - name: Setup gh CLI authentication
+        run: |
+          echo "${{ github.token }}" | gh auth login --with-token
+          gh auth status
+
       - name: Run Claude with Adversarial Workflow
         uses: anthropics/claude-code-action@v1
         with:
@@ -310,6 +315,9 @@ jobs:
             --max-turns ${{ inputs.max_claude_turns }}
             --model ${{ inputs.claude_model }}
             --append-system-prompt "You are part of an adversarial quality assurance system. Mediocrity is unacceptable. Follow CLAUDE.md standards ruthlessly."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Remove lock label
         if: always()
