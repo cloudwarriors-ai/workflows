@@ -133,23 +133,45 @@ jobs:
             console.log('Starting RLM analysis...');
             const result = await rlm.query(
               context,
-              `Analyze this codebase and provide:
-              1. Architecture overview (layers, modules, patterns)
-              2. Key components and their responsibilities
-              3. Common patterns and conventions used
-              4. Dependency relationships
-              5. Code quality hotspots (complex or problematic areas)
-              6. Testing patterns and coverage areas
-              7. Security patterns used
-              8. Recommended practices for new code
+              `You have access to a codebase provided in the 'context' variable as a string.
 
-              Format as structured JSON with these keys:
-              - architecture: { layers: [], modules: [], mainPatterns: [] }
-              - components: [{ name, path, responsibility, dependencies }]
-              - conventions: { naming, errorHandling, testing, logging }
-              - qualityHotspots: [{ file, reason, complexity }]
-              - securityPatterns: []
-              - recommendations: []`
+              IMPORTANT: Only use these Python tools:
+              - context (string variable with all file contents)
+              - set_result(data) to return your analysis
+              - Standard modules: json, re, collections
+              - NO custom functions - use only built-in string methods and regex
+
+              Write simple Python code to analyze the codebase and call set_result() with a JSON object.
+
+              Analyze the context string directly using:
+              - re.findall() for pattern matching
+              - str.split(), str.count() for parsing
+              - Basic iteration over lines
+
+              Provide analysis with these keys:
+              {
+                "architecture": {
+                  "layers": ["list of architectural layers found"],
+                  "modules": ["main modules/directories"],
+                  "mainPatterns": ["design patterns identified"]
+                },
+                "components": [
+                  {"name": "component name", "path": "file path", "responsibility": "what it does", "dependencies": ["deps"]}
+                ],
+                "conventions": {
+                  "naming": "naming conventions observed",
+                  "errorHandling": "error handling patterns",
+                  "testing": "testing approach",
+                  "logging": "logging patterns"
+                },
+                "qualityHotspots": [
+                  {"file": "path", "reason": "why it's complex", "complexity": "high/medium/low"}
+                ],
+                "securityPatterns": ["security measures found"],
+                "recommendations": ["best practices to follow"]
+              }
+
+              Keep your Python code simple - just parse the context string and call set_result().`
             );
 
             if (result.success) {
