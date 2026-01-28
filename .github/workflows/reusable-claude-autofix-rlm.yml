@@ -121,6 +121,12 @@ jobs:
             // Create RLM instance
             const rlm = createRLM({
               apiKey: process.env.OPENROUTER_API_KEY,
+              model: 'anthropic/claude-sonnet-4',
+              config: {
+                maxRecursionDepth: 5,
+                maxCostUsd: parseFloat(process.env.RLM_MAX_COST_USD) || 5.0,
+                timeoutMs: 300000,
+              },
             });
 
             // Analyze with RLM
