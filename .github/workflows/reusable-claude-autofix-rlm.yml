@@ -325,6 +325,8 @@ jobs:
             Bash: run git commands
             Bash: run npm commands
             Bash: run node commands
+            Edit: modify source files
+            Write: create new files
           prompt: |
             Fix GitHub issue #${{ inputs.issue_number }}.
 
