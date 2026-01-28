@@ -165,8 +165,19 @@ jobs:
                 }
               }, null, 2));
 
-              console.log('Analysis saved to .rlm-analysis.json');
-              return '.rlm-analysis.json';
+              const savedPath = '.rlm-analysis.json';
+              console.log(`Analysis saved to ${savedPath}`);
+              console.log('Current working directory:', process.cwd());
+
+              // Verify file was written
+              try {
+                const stats = await readFile(savedPath, 'utf-8');
+                console.log(`File verified, size: ${stats.length} bytes`);
+              } catch (err) {
+                console.error('File verification failed:', err);
+              }
+
+              return savedPath;
             } else {
               throw new Error(`RLM analysis failed: ${result.error}`);
             }
@@ -180,6 +191,9 @@ jobs:
 
           # Run analysis
           node analyze.mjs
+
+          # Verify file exists
+          ls -la .rlm-analysis.json || echo "File not found!"
 
           # Output path
           echo "analysis_path=.rlm-analysis.json" >> $GITHUB_OUTPUT
