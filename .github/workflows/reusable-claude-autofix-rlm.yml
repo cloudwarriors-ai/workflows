@@ -27,6 +27,9 @@ on:
         required: true
       OPENROUTER_API_KEY:
         required: true
+      workflow_PAT:
+        description: 'Personal access token for PR creation (needed for reusable workflows)'
+        required: false
 
 # Prevent concurrent runs on the same issue
 concurrency:
@@ -389,7 +392,13 @@ jobs:
         if: steps.fix.outputs.has_changes == 'true'
         id: pr
         run: |
-          echo "${{ github.token }}" | gh auth login --with-token
+          # Use PAT if available (needed for reusable workflows), otherwise fall back to GITHUB_TOKEN
+          TOKEN="${{ secrets.workflow_PAT }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${{ github.token }}"
+          fi
+          echo "$TOKEN" | gh auth login --with-token
+
           PR_URL=$(gh pr create \
             --title "fix: resolve issue #${{ inputs.issue_number }}" \
             --base main \
