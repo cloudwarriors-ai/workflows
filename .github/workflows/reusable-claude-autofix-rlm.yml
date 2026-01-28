@@ -307,17 +307,33 @@ jobs:
           # Create tool-use-attempt hook to auto-approve gh commands
           cat > .claude/hooks/tool-use-attempt.sh << 'HOOK_EOF'
           #!/bin/bash
-          # Auto-approve gh commands in CI
-          if [[ "$TOOL_NAME" == "Bash" ]]; then
-            COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // empty')
-            if [[ "$COMMAND" =~ ^gh\ .* ]]; then
+          # Auto-approve all gh commands in CI environment
+          # Hook receives JSON input via stdin with tool_name and tool_input
+
+          # Read stdin to a variable
+          input=$(cat)
+
+          # Extract tool name
+          tool_name=$(echo "$input" | jq -r '.tool_name // empty')
+
+          # If it's a Bash tool, check if command starts with 'gh'
+          if [[ "$tool_name" == "Bash" ]]; then
+            command=$(echo "$input" | jq -r '.tool_input.command // empty')
+            if [[ "$command" =~ ^gh\  ]]; then
               echo "AUTO_APPROVE"
               exit 0
             fi
           fi
+
+          # Default: no approval
+          exit 0
           HOOK_EOF
 
           chmod +x .claude/hooks/tool-use-attempt.sh
+
+          # Verify hook was created
+          echo "Hook created:"
+          cat .claude/hooks/tool-use-attempt.sh
 
           # Verify skills are present
           echo "Checking skills directory..."
