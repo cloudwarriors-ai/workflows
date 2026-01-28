@@ -265,51 +265,93 @@ jobs:
         with:
           name: rlm-analysis
 
-      - name: Copy skills from org repo
+      - name: Copy skills and configure Claude
         run: |
           # Clone org .github repo to get skills
           git clone https://github.com/cloudwarriors-ai/.github.git /tmp/org-github
 
-          # Copy skills if they don't exist in this repo
-          if [ ! -d ".claude/skills" ]; then
-            mkdir -p .claude/skills
-            cp -r /tmp/org-github/.claude/skills/* .claude/skills/
-          fi
+          # Ensure .claude directory exists
+          mkdir -p .claude/skills
+
+          # Always copy skills from org (overwrite if exists)
+          cp -r /tmp/org-github/.claude/skills/* .claude/skills/
 
           # Copy CLAUDE.md if it doesn't exist
           if [ ! -f "CLAUDE.md" ]; then
             cp /tmp/org-github/CLAUDE.md ./
           fi
 
+          # Create Claude settings to enable skills
+          mkdir -p ~/.claude
+          cat > ~/.claude/settings.json << 'EOF'
+          {
+            "enableAllProjectMcpServers": true,
+            "enableSkills": true
+          }
+          EOF
+
+          # Verify skills were copied
+          echo "Skills installed:"
+          ls -la .claude/skills/
+
       - name: Setup gh CLI authentication
         run: |
           echo "${{ github.token }}" | gh auth login --with-token
           gh auth status
+
+      - name: Setup Claude hooks for auto-approval
+        run: |
+          # Create hooks directory
+          mkdir -p .claude/hooks
+
+          # Create tool-use-attempt hook to auto-approve gh commands
+          cat > .claude/hooks/tool-use-attempt.sh << 'HOOK_EOF'
+          #!/bin/bash
+          # Auto-approve gh commands in CI
+          if [[ "$TOOL_NAME" == "Bash" ]]; then
+            COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // empty')
+            if [[ "$COMMAND" =~ ^gh\ .* ]]; then
+              echo "AUTO_APPROVE"
+              exit 0
+            fi
+          fi
+          HOOK_EOF
+
+          chmod +x .claude/hooks/tool-use-attempt.sh
+
+          # Verify skills are present
+          echo "Checking skills directory..."
+          ls -la .claude/skills/ || echo "Skills directory not found!"
 
       - name: Run Claude with Adversarial Workflow
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            Fix issue #${{ inputs.issue_number }} using the adversarial workflow.
+            Fix GitHub issue #${{ inputs.issue_number }}.
 
-            Use the /fix-issue skill to orchestrate the full workflow:
-            - Planner will create a bulletproof plan
-            - Adversarial Supervisor will challenge it
-            - Builder will implement with excellence
-            - Adversarial Supervisor will review ruthlessly
-            - Validator will run all quality gates
+            ISSUE DETAILS:
+            You can view the issue with: gh issue view ${{ inputs.issue_number }}
+            The issue is in the current repository.
 
-            RLM codebase analysis is available at rlm-analysis.json
+            CODEBASE ANALYSIS:
+            RLM codebase analysis is available at: rlm-analysis.json
+            Read this file first to understand the codebase architecture.
 
+            STANDARDS:
             Follow all standards in CLAUDE.md (no compromises).
 
-            If you have questions, follow escalation policy:
-            1. Check CLAUDE.md and RLM analysis first
-            2. Escalate to supervisor if needed
-            3. Post comment on issue only if supervisor can't resolve
+            WORKFLOW:
+            If /fix-issue skill is available, use it to orchestrate the full adversarial workflow.
+            Otherwise, implement the fix manually following these principles:
+            1. Read the issue details
+            2. Review CLAUDE.md and RLM analysis
+            3. Plan the fix thoroughly
+            4. Implement with clean code principles
+            5. Test the changes
+            6. Create a PR with detailed description
 
-            Maximum 3 iterations. If unsuccessful after 3 attempts, document findings and add needs-human-review label.
+            gh CLI is authenticated and ready to use.
 
           claude_args: |
             --max-turns ${{ inputs.max_claude_turns }}
