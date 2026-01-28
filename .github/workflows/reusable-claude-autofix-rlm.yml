@@ -88,11 +88,10 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RLM_MAX_COST_USD: ${{ inputs.max_rlm_cost }}
         run: |
-          # Create RLM analysis script
-          cat > analyze.js << 'EOF'
-          const { createRLM } = require('@cloudwarriors-ai/rlm');
-          const { readdir, readFile, writeFile } = require('node:fs/promises');
-          const { join } = require('node:path');
+          # Create RLM analysis script (ES modules)
+          cat > analyze.mjs << 'EOF'
+          import { createRLM } from '@cloudwarriors-ai/rlm';
+          import { readdir, readFile, writeFile } from 'node:fs/promises';
 
           async function analyzeCodebase() {
             // Gather all source files
@@ -174,7 +173,7 @@ jobs:
           EOF
 
           # Run analysis
-          node analyze.js
+          node analyze.mjs
 
           # Output path
           echo "analysis_path=.rlm-analysis.json" >> $GITHUB_OUTPUT
