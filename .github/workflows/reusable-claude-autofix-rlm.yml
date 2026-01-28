@@ -80,7 +80,7 @@ jobs:
           node-version: '22'
 
       - name: Install RLM
-        run: npm install -g @cloudwarriors-ai/rlm
+        run: npm install @cloudwarriors-ai/rlm
 
       - name: Run RLM Codebase Analysis
         id: run-rlm
