@@ -155,7 +155,11 @@ jobs:
             if (result.success) {
               console.log(`RLM analysis complete. Cost: $${result.usage.costUsd.toFixed(4)}`);
 
-              await writeFile('.rlm-analysis.json', JSON.stringify({
+              // Save to explicit path in GitHub workspace
+              const workspacePath = process.env.GITHUB_WORKSPACE || process.cwd();
+              const savedPath = `${workspacePath}/rlm-analysis.json`;
+
+              await writeFile(savedPath, JSON.stringify({
                 analysis: result.answer,
                 metadata: {
                   timestamp: new Date().toISOString(),
@@ -165,9 +169,9 @@ jobs:
                 }
               }, null, 2));
 
-              const savedPath = '.rlm-analysis.json';
               console.log(`Analysis saved to ${savedPath}`);
               console.log('Current working directory:', process.cwd());
+              console.log('GITHUB_WORKSPACE:', workspacePath);
 
               // Verify file was written
               try {
@@ -193,16 +197,19 @@ jobs:
           node analyze.mjs
 
           # Verify file exists
-          ls -la .rlm-analysis.json || echo "File not found!"
+          echo "Checking for rlm-analysis.json in workspace..."
+          ls -la rlm-analysis.json || echo "File not found!"
+          pwd
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
 
           # Output path
-          echo "analysis_path=.rlm-analysis.json" >> $GITHUB_OUTPUT
+          echo "analysis_path=rlm-analysis.json" >> $GITHUB_OUTPUT
 
       - name: Upload RLM Analysis
         uses: actions/upload-artifact@v4
         with:
           name: rlm-analysis
-          path: .rlm-analysis.json
+          path: rlm-analysis.json
           retention-days: 7
 
       - name: Comment analysis complete
@@ -265,7 +272,7 @@ jobs:
             - Adversarial Supervisor will review ruthlessly
             - Validator will run all quality gates
 
-            RLM codebase analysis is available at .rlm-analysis.json
+            RLM codebase analysis is available at rlm-analysis.json
 
             Follow all standards in CLAUDE.md (no compromises).
 
