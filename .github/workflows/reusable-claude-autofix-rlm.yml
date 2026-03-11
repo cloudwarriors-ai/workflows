@@ -7,6 +7,11 @@ on:
         description: 'Issue number to fix'
         required: true
         type: number
+      source_issue_number:
+        description: 'Source issue number from the customer repository'
+        required: false
+        type: number
+        default: 0
       base_branch:
         description: 'Base branch for the fix'
         required: false
@@ -339,6 +344,8 @@ jobs:
               issueBody = issueBody.slice(0, 15000) + '\n\n[CONTENT TRUNCATED]';
             }
 
+            const sourceIssueNumber = Number('${{ inputs.source_issue_number }}') || Number('${{ inputs.issue_number }}');
+
             const configPath = path.join(process.cwd(), '.autopilot', 'config.json');
             const promptPath = path.join(process.cwd(), '.autopilot', 'claude-prompt.md');
             const defaultTestPatterns = [
@@ -374,7 +381,7 @@ jobs:
 
             // Build prompt
             let prompt = '';
-            prompt += `## Issue #${{ inputs.issue_number }}: ${issue.data.title}\n\n`;
+            prompt += `## Source Issue #${sourceIssueNumber} (Mirror Issue #${{ inputs.issue_number }}): ${issue.data.title}\n\n`;
             prompt += `<user_issue_content>\n${issueBody}\n</user_issue_content>\n\n`;
             prompt += `## Instructions\n\n`;
             prompt += `Follow the workflow defined in CLAUDE.md:\n\n`;
@@ -389,7 +396,7 @@ jobs:
             prompt += `5. **Stop after 5 identical failures** and report blockers\n\n`;
             if (issueBundleEnabled) {
               const resolvedPatterns = testPatterns.map(pattern =>
-                pattern.replaceAll('{id}', String(${{ inputs.issue_number }}))
+                pattern.replaceAll('{id}', String(sourceIssueNumber))
               );
               prompt += `## Issue Bundle Validation\n\n`;
               prompt += `Your fix will be validated with validate-issue-bundle.ts.\n`;
