@@ -313,6 +313,7 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
 
             const issue = await github.rest.issues.get({
               owner: context.repo.owner,
@@ -338,6 +339,39 @@ jobs:
               issueBody = issueBody.slice(0, 15000) + '\n\n[CONTENT TRUNCATED]';
             }
 
+            const configPath = path.join(process.cwd(), '.autopilot', 'config.json');
+            const promptPath = path.join(process.cwd(), '.autopilot', 'claude-prompt.md');
+            const defaultTestPatterns = [
+              'tests/integration/issues/issue-{id}-*',
+              'tests/e2e/issues/issue-{id}-*'
+            ];
+            const defaultAssertionPatterns = ['expect('];
+
+            let autopilotConfig = {};
+            if (fs.existsSync(configPath)) {
+              try {
+                autopilotConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+              } catch (error) {
+                core.warning(`Failed to parse ${configPath}: ${error.message}`);
+              }
+            }
+
+            const testPatterns = Array.isArray(autopilotConfig.testPatterns) && autopilotConfig.testPatterns.length > 0
+              ? autopilotConfig.testPatterns
+              : defaultTestPatterns;
+            const assertionPatterns = Array.isArray(autopilotConfig.assertionPatterns) && autopilotConfig.assertionPatterns.length > 0
+              ? autopilotConfig.assertionPatterns
+              : defaultAssertionPatterns;
+            const issueBundleEnabled = autopilotConfig.validation?.issueBundle?.enabled !== false;
+            const qualityGates = [
+              autopilotConfig.lintCommand,
+              autopilotConfig.buildCommand,
+              autopilotConfig.testCommand
+            ].filter(command => typeof command === 'string' && command.trim().length > 0);
+            const repoPrompt = fs.existsSync(promptPath)
+              ? fs.readFileSync(promptPath, 'utf8').trim()
+              : '';
+
             // Build prompt
             let prompt = '';
             prompt += `## Issue #${{ inputs.issue_number }}: ${issue.data.title}\n\n`;
@@ -346,9 +380,29 @@ jobs:
             prompt += `Follow the workflow defined in CLAUDE.md:\n\n`;
             prompt += `1. **Understand the issue** - Read relevant code files and the RLM analysis at rlm-analysis.json\n`;
             prompt += `2. **Implement the fix** - Minimal changes only\n`;
-            prompt += `3. **Run quality gates** and iterate until ALL pass: npm run lint && npm run build\n`;
+            if (qualityGates.length > 0) {
+              prompt += `3. **Run the repo quality gates** and iterate until they pass: ${qualityGates.join(' && ')}\n`;
+            } else {
+              prompt += `3. **Run the relevant quality gates** and iterate until they pass\n`;
+            }
             prompt += `4. **If gates fail, fix and retry**\n`;
             prompt += `5. **Stop after 5 identical failures** and report blockers\n\n`;
+            if (issueBundleEnabled) {
+              const resolvedPatterns = testPatterns.map(pattern =>
+                pattern.replaceAll('{id}', String(${{ inputs.issue_number }}))
+              );
+              prompt += `## Issue Bundle Validation\n\n`;
+              prompt += `Your fix will be validated with validate-issue-bundle.ts.\n`;
+              prompt += `Before you finish, add or update at least one issue-scoped test file matching one of these patterns:\n`;
+              for (const pattern of resolvedPatterns) {
+                prompt += `- ${pattern}\n`;
+              }
+              prompt += `Those test files must include assertions matching one of: ${assertionPatterns.join(', ')}.\n`;
+              prompt += `Do not leave TODOs, skipped tests, or empty placeholder tests in those files.\n\n`;
+            }
+            if (repoPrompt) {
+              prompt += `## Repo-Specific Instructions\n\n${repoPrompt}\n\n`;
+            }
             prompt += `## Security Rules\n\n`;
             prompt += `IMPORTANT:\n`;
             prompt += `- Do NOT modify .github/workflows/ or .env* files\n`;
