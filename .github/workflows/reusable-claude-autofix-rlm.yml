@@ -330,6 +330,14 @@ jobs:
             prompt += `3. **Run quality gates** and iterate until ALL pass: npm run lint && npm run build\n`;
             prompt += `4. **If gates fail, fix and retry**\n`;
             prompt += `5. **Stop after 5 identical failures** and report blockers\n\n`;
+            prompt += `## Visual Verification (CRITICAL)\n\n`;
+            prompt += `Determine if this issue involves a VISUAL change (UI text, styling, layout, new elements, etc.).\n`;
+            prompt += `If it does, you MUST verify BEFORE committing:\n`;
+            prompt += `- The new element/text is actually RENDERED in the JSX/TSX — not just imported or defined\n`;
+            prompt += `- Trace the full path: data source → variable → JSX render. If any link is missing, the fix is INCOMPLETE\n`;
+            prompt += `- Search the component tree to confirm the value appears in a return/render statement\n`;
+            prompt += `- A variable that is imported but never used in JSX is a BROKEN fix\n`;
+            prompt += `- A config value that is defined but never referenced in a component is a BROKEN fix\n\n`;
             prompt += `## Security Rules\n\n`;
             prompt += `IMPORTANT:\n`;
             prompt += `- Do NOT modify .github/workflows/ or .env* files\n`;
