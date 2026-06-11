@@ -374,6 +374,39 @@ jobs:
           git checkout -- .github/ 2>/dev/null || true
           git checkout -- .env* 2>/dev/null || true
 
+          # Remove CI analysis artifacts and dependency-install lockfile noise before
+          # deciding whether the fix branch has changes worth committing.
+          git rm -f --ignore-unmatch rlm-analysis.json .rlm-analysis.json >/dev/null 2>&1 || true
+          rm -f rlm-analysis.json .rlm-analysis.json
+
+          MANIFEST_CHANGES=$(
+            git status --porcelain -- package.json ':(glob)**/package.json' 2>/dev/null || true
+          )
+          if [ -z "$MANIFEST_CHANGES" ]; then
+            LOCKFILE_CHANGES=$(
+              {
+                git diff --name-only -- \
+                  package-lock.json ':(glob)**/package-lock.json' \
+                  npm-shrinkwrap.json ':(glob)**/npm-shrinkwrap.json' \
+                  pnpm-lock.yaml ':(glob)**/pnpm-lock.yaml' \
+                  yarn.lock ':(glob)**/yarn.lock' \
+                  bun.lockb ':(glob)**/bun.lockb' 2>/dev/null || true
+                git ls-files --others --exclude-standard -- \
+                  package-lock.json ':(glob)**/package-lock.json' \
+                  npm-shrinkwrap.json ':(glob)**/npm-shrinkwrap.json' \
+                  pnpm-lock.yaml ':(glob)**/pnpm-lock.yaml' \
+                  yarn.lock ':(glob)**/yarn.lock' \
+                  bun.lockb ':(glob)**/bun.lockb' 2>/dev/null || true
+              } | sort -u
+            )
+            if [ -n "$LOCKFILE_CHANGES" ]; then
+              while IFS= read -r lockfile; do
+                [ -z "$lockfile" ] && continue
+                git checkout -- "$lockfile" 2>/dev/null || rm -f "$lockfile"
+              done <<< "$LOCKFILE_CHANGES"
+            fi
+          fi
+
           # Check for changes
           HAS_CHANGES=false
           if [ -n "$(git status --porcelain)" ]; then
