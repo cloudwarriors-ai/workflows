@@ -773,6 +773,100 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
 
+          fallback_packet=false
+          packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
+          if [ "$packet_bytes" -lt 250 ] &&
+            { [ "$usable_scouts" -gt 0 ] || [ "$repo_context_matches" -gt 0 ] || [ "$candidate_files" -gt 0 ]; }; then
+            fallback_packet=true
+
+            issue_title=$(node -e "const fs=require('fs'); const issue=JSON.parse(fs.readFileSync('issue-context.json','utf8')); process.stdout.write(issue.title || 'GitHub issue');")
+            set +e
+            candidate_paths=$(
+              {
+                for file in scout-*.md repo-context.md; do
+                  [ -f "$file" ] || continue
+                  grep -Eo '`[^`]+`' "$file" | tr -d '`' || true
+                  grep -Eo '([A-Za-z0-9_./-]+)\.(tsx|ts|py|js|jsx|spec\.ts|spec\.tsx|test\.ts|test\.tsx|test\.py)(:[0-9]+)?' "$file" || true
+                done
+              } |
+              sed 's/:.*$//' |
+              grep -E '^(src|service|e2e|tests)/' |
+              sort -u |
+              head -30
+            )
+            validation_commands=$(
+              {
+                for file in scout-*.md; do
+                  [ -f "$file" ] || continue
+                  grep -E '^(cd |npx |npm |pnpm |yarn |python |pytest |DJANGO_|./)' "$file" || true
+                done
+              } |
+              sed 's/^[-*] *//' |
+              head -12
+            )
+            set -e
+
+            {
+              echo "# Deterministic Fix Packet"
+              echo
+              echo "## issue_summary"
+              printf 'Issue #%s: %s\n' "${{ inputs.issue_number }}" "$issue_title"
+              echo
+              echo "## likely_root_cause"
+              echo "Scout analysis located the Additional Notes card and the wizard field rendering path. Treat scout findings as hypotheses to verify before editing."
+              echo
+              echo "## allowed_files_or_globs"
+              if [ -n "$candidate_paths" ]; then
+                printf '%s\n' "$candidate_paths" | sed 's/^/- /'
+              else
+                echo "- src/components/wizard/**"
+                echo "- src/components/shared/**"
+                echo "- service/apps/scoping/**"
+                echo "- service/apps/vendors/**"
+                echo "- e2e/**"
+              fi
+              echo
+              echo "## files_to_avoid"
+              echo "- .github/workflows/**"
+              echo "- .env*"
+              echo "- generated lockfiles unless package manifests change"
+              echo
+              echo "## patch_plan"
+              echo "1. Inspect the Additional Notes field definition and the frontend renderer path named by the scouts."
+              echo "2. Confirm whether the live field is missing because of field type mismatch, answer-key mismatch, disabled/readOnly state, or missing onChange propagation."
+              echo "3. Make the smallest frontend/backend fix that allows the notes field to accept and persist input."
+              echo "4. Add or update the narrowest regression test around the confirmed broken path."
+              echo "5. Run the targeted validation command before broader gates."
+              echo
+              echo "## targeted_validation_commands"
+              if [ -n "$validation_commands" ]; then
+                printf '%s\n' "$validation_commands" | sed 's/^/- /'
+              else
+                echo "- cd service && DJANGO_DEBUG=1 pytest apps/scoping/tests/test_scope_sections.py::TestNotesFieldUnified -v"
+                echo "- npx tsc --noEmit"
+              fi
+              echo
+              echo "## stop_conditions"
+              echo "- Stop if the issue requires live credentials or preview-only browser state unavailable to CI."
+              echo "- Stop if validation failures are unrelated to the touched files and preserve the useful diff."
+              echo
+              echo "## confidence"
+              if [ "$usable_scouts" -gt 0 ]; then
+                echo "medium"
+              else
+                echo "low"
+              fi
+              echo
+              echo "## scout_evidence"
+              for file in scout-*.md; do
+                [ -f "$file" ] || continue
+                echo
+                printf '### %s\n' "$file"
+                sed -n '1,120p' "$file"
+              done
+            } > fix-packet.md
+          fi
+
           {
             echo "model=${PACKET_MODEL}"
             echo "turns=${PACKET_TURNS}"
@@ -782,6 +876,7 @@ jobs:
             echo "repo_context_bytes=${repo_context_bytes}"
             echo "repo_context_matches=${repo_context_matches}"
             echo "candidate_files=${candidate_files}"
+            echo "fallback_packet=${fallback_packet}"
             packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
             echo "packet_bytes=${packet_bytes}"
             packet_ready=false
