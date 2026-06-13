@@ -416,6 +416,7 @@ jobs:
             echo "## Focused Match Snippets"
           } > repo-context.md
 
+          repo_context_matches=0
           while IFS= read -r pattern; do
             [ -n "$pattern" ] || continue
             {
@@ -424,17 +425,21 @@ jobs:
             } >> repo-context.md
 
             set +e
-            matches=$(rg -n -i --fixed-strings \
-              --glob '!node_modules' \
-              --glob '!dist' \
-              --glob '!build' \
-              --glob '!coverage' \
-              --glob '!*.map' \
-              -- "$pattern" . 2>/dev/null | head -25)
+            matches=$(git grep -n -i -F -- "$pattern" -- . \
+              ':(exclude)node_modules' \
+              ':(exclude).agents/**' \
+              ':(exclude).claude/**' \
+              ':(exclude).codex/**' \
+              ':(exclude)dist' \
+              ':(exclude)build' \
+              ':(exclude)coverage' \
+              ':(exclude)*.map' 2>/dev/null | head -25)
             set -e
 
             if [ -n "$matches" ]; then
               printf '%s\n' "$matches" >> repo-context.md
+              count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')
+              repo_context_matches=$((repo_context_matches + count))
             else
               echo "(no matches)" >> repo-context.md
             fi
@@ -444,17 +449,15 @@ jobs:
             echo
             echo "## Candidate File Globs"
             set +e
-            candidate_files=$(rg --files \
-              -g '!node_modules' \
-              -g '!dist' \
-              -g '!build' \
-              -g '!coverage' \
-              -g '!*.map' |
-              rg -i 'wizard|scope|scoping|session|sow|notes|ucaas|migration|card|form|provider' |
+            candidate_files=$(git ls-files |
+              grep -E '^(src|service|e2e|tests)/' |
+              grep -Evi '(^|/)(node_modules|dist|build|coverage)/|\.map$' |
+              grep -Ei 'wizard|scope|scoping|session|sow|notes|ucaas|migration|card|form|provider' |
               head -80)
             set -e
             printf '%s\n' "$candidate_files"
           } >> repo-context.md
+          candidate_file_count=$(printf '%s\n' "$candidate_files" | sed '/^$/d' | wc -l | tr -d ' ')
 
           repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')
           if [ "$repo_context_bytes" -gt 80000 ]; then
@@ -470,6 +473,8 @@ jobs:
           {
             echo "patterns=$(wc -l < /tmp/autofix-search-patterns.txt | tr -d ' ')"
             echo "repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')"
+            echo "repo_context_matches=${repo_context_matches}"
+            echo "candidate_files=${candidate_file_count}"
           } > repo-context-meta.txt
 
       - name: Upload repo search context
@@ -672,8 +677,16 @@ jobs:
           total_scouts=0
           usable_scouts=0
           repo_context_bytes=0
+          repo_context_matches=0
+          candidate_files=0
           if [ -f repo-context.md ]; then
             repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')
+          fi
+          if [ -f repo-context-meta.txt ]; then
+            repo_context_matches=$(sed -n 's/^repo_context_matches=//p' repo-context-meta.txt | tail -1)
+            candidate_files=$(sed -n 's/^candidate_files=//p' repo-context-meta.txt | tail -1)
+            repo_context_matches=${repo_context_matches:-0}
+            candidate_files=${candidate_files:-0}
           fi
           for meta in scout-*-meta.txt; do
             [ -f "$meta" ] || continue
@@ -683,7 +696,7 @@ jobs:
             fi
           done
 
-          if [ "$usable_scouts" -eq 0 ] && [ "$repo_context_bytes" -lt 500 ]; then
+          if [ "$usable_scouts" -eq 0 ] && [ "$repo_context_matches" -eq 0 ] && [ "$candidate_files" -eq 0 ]; then
             {
               echo "# Fix packet unavailable"
               echo
@@ -697,6 +710,8 @@ jobs:
               echo "total_scouts=${total_scouts}"
               echo "usable_scouts=${usable_scouts}"
               echo "repo_context_bytes=${repo_context_bytes}"
+              echo "repo_context_matches=${repo_context_matches}"
+              echo "candidate_files=${candidate_files}"
               echo "packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')"
               echo "packet_ready=false"
               echo "failure_reason=no_usable_scouts_or_repo_context"
@@ -765,6 +780,8 @@ jobs:
             echo "total_scouts=${total_scouts}"
             echo "usable_scouts=${usable_scouts}"
             echo "repo_context_bytes=${repo_context_bytes}"
+            echo "repo_context_matches=${repo_context_matches}"
+            echo "candidate_files=${candidate_files}"
             packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
             echo "packet_bytes=${packet_bytes}"
             packet_ready=false
