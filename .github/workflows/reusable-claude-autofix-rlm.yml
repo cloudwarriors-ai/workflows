@@ -24,7 +24,7 @@ on:
         description: 'Maximum Claude turns for fix attempts'
         required: false
         type: number
-        default: 30
+        default: 60
       claude_model:
         description: 'Claude model to use. OpenRouter provider/model ID (e.g. anthropic/claude-sonnet-4.6).'
         required: false
@@ -325,18 +325,18 @@ jobs:
             prompt += `## Issue #${{ inputs.issue_number }}: ${issue.data.title}\n\n`;
             prompt += `<user_issue_content>\n${issueBody}\n</user_issue_content>\n\n`;
             prompt += `## Instructions\n\n`;
-            prompt += `Follow the workflow defined in CLAUDE.md:\n\n`;
-            prompt += `1. **Understand the issue** - Read relevant code files and the RLM analysis at rlm-analysis.json\n`;
-            prompt += `2. **Implement the fix** - Minimal changes only\n`;
-            prompt += `3. **Run quality gates** and iterate until ALL pass: npm run lint && npm run build\n`;
-            prompt += `4. **If gates fail, fix and retry**\n`;
-            prompt += `5. **Stop after 5 identical failures** and report blockers\n\n`;
+            prompt += `Follow CLAUDE.md, but optimize for a reviewable branch before exhaustive investigation.\n\n`;
+            prompt += `1. **Locate fast** - Use the issue title/body and rlm-analysis.json to identify the smallest likely file set. Prefer rg and targeted reads; avoid broad repo tours.\n`;
+            prompt += `2. **Edit early** - Once the likely cause is found, implement the minimal focused fix before running broad validation.\n`;
+            prompt += `3. **Validate in layers** - Run the narrowest relevant check first (targeted unit test, typecheck for touched area, or focused lint). After a diff exists, run broader gates only when they are available and likely to finish.\n`;
+            prompt += `4. **Iterate only on concrete failures** - If a validation command fails, fix the reported failure and retry once. Stop after 3 repeated or environment-only failures and leave the best useful diff.\n`;
+            prompt += `5. **Do not chase unrelated debt** - Keep changes focused on this issue and preserve unrelated behavior.\n\n`;
             prompt += `## Visual Verification (CRITICAL)\n\n`;
             prompt += `Determine if this issue involves a VISUAL change (UI text, styling, layout, new elements, etc.).\n`;
-            prompt += `If it does, you MUST verify BEFORE committing:\n`;
+            prompt += `If it does, verify the render path before committing:\n`;
             prompt += `- The new element/text is actually RENDERED in the JSX/TSX — not just imported or defined\n`;
             prompt += `- Trace the full path: data source → variable → JSX render. If any link is missing, the fix is INCOMPLETE\n`;
-            prompt += `- Search the component tree to confirm the value appears in a return/render statement\n`;
+            prompt += `- Search the touched component path to confirm the value appears in a return/render statement\n`;
             prompt += `- A variable that is imported but never used in JSX is a BROKEN fix\n`;
             prompt += `- A config value that is defined but never referenced in a component is a BROKEN fix\n\n`;
             prompt += `## Security Rules\n\n`;
