@@ -781,7 +781,7 @@ jobs:
 
             issue_title=$(node -e "const fs=require('fs'); const issue=JSON.parse(fs.readFileSync('issue-context.json','utf8')); process.stdout.write(issue.title || 'GitHub issue');")
             set +e
-            candidate_paths=$(
+            raw_candidate_paths=$(
               {
                 for file in scout-*.md repo-context.md; do
                   [ -f "$file" ] || continue
@@ -791,7 +791,14 @@ jobs:
               } |
               sed 's/:.*$//' |
               grep -E '^(src|service|e2e|tests)/' |
-              sort -u |
+              awk 'NF && !seen[$0]++'
+            )
+            candidate_paths=$(
+              {
+                printf '%s\n' "$raw_candidate_paths" | grep -E '^(src|service|tests)/' || true
+                printf '%s\n' "$raw_candidate_paths" | grep -E '^e2e/' || true
+              } |
+              awk 'NF && !seen[$0]++' |
               head -30
             )
             validation_commands=$(
@@ -879,16 +886,27 @@ jobs:
             echo "fallback_packet=${fallback_packet}"
             packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
             echo "packet_bytes=${packet_bytes}"
-            packet_ready=false
-            if [ "$status" -eq 0 ] &&
-              [ "$packet_bytes" -ge 250 ] &&
+            packet_has_required_sections=false
+            if [ "$packet_bytes" -ge 250 ] &&
               grep -q 'allowed_files_or_globs' fix-packet.md &&
               grep -q 'patch_plan' fix-packet.md &&
               grep -q 'targeted_validation_commands' fix-packet.md &&
               ! grep -qi "Reached max turns" fix-packet.md; then
+              packet_has_required_sections=true
+            fi
+            echo "packet_has_required_sections=${packet_has_required_sections}"
+
+            packet_ready=false
+            packet_ready_reason=not_actionable
+            if [ "$packet_has_required_sections" = "true" ] && [ "$status" -eq 0 ]; then
               packet_ready=true
+              packet_ready_reason=model_packet
+            elif [ "$packet_has_required_sections" = "true" ] && [ "$fallback_packet" = "true" ]; then
+              packet_ready=true
+              packet_ready_reason=fallback_packet
             fi
             echo "packet_ready=${packet_ready}"
+            echo "packet_ready_reason=${packet_ready_reason}"
           } > fix-packet-meta.txt
 
           if [ "$status" -ne 0 ]; then
