@@ -886,24 +886,30 @@ jobs:
             echo "fallback_packet=${fallback_packet}"
             packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
             echo "packet_bytes=${packet_bytes}"
+            packet_generation_error=false
+            if head -5 fix-packet.md | grep -qi "Reached max turns"; then
+              packet_generation_error=true
+            fi
+            echo "packet_generation_error=${packet_generation_error}"
             packet_has_required_sections=false
             if [ "$packet_bytes" -ge 250 ] &&
               grep -q 'allowed_files_or_globs' fix-packet.md &&
               grep -q 'patch_plan' fix-packet.md &&
-              grep -q 'targeted_validation_commands' fix-packet.md &&
-              ! grep -qi "Reached max turns" fix-packet.md; then
+              grep -q 'targeted_validation_commands' fix-packet.md; then
               packet_has_required_sections=true
             fi
             echo "packet_has_required_sections=${packet_has_required_sections}"
 
             packet_ready=false
             packet_ready_reason=not_actionable
-            if [ "$packet_has_required_sections" = "true" ] && [ "$status" -eq 0 ]; then
-              packet_ready=true
-              packet_ready_reason=model_packet
-            elif [ "$packet_has_required_sections" = "true" ] && [ "$fallback_packet" = "true" ]; then
+            if [ "$packet_has_required_sections" = "true" ] && [ "$fallback_packet" = "true" ]; then
               packet_ready=true
               packet_ready_reason=fallback_packet
+            elif [ "$packet_has_required_sections" = "true" ] &&
+              [ "$status" -eq 0 ] &&
+              [ "$packet_generation_error" = "false" ]; then
+              packet_ready=true
+              packet_ready_reason=model_packet
             fi
             echo "packet_ready=${packet_ready}"
             echo "packet_ready_reason=${packet_ready_reason}"
