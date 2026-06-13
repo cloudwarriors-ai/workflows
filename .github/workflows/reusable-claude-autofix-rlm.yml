@@ -1024,6 +1024,10 @@ jobs:
           - Edit early. Once the likely cause is confirmed, make the minimal fix before
             running broad validation.
           - Add or update the smallest meaningful regression test when feasible.
+          - For bug fixes, the pipeline fails if production code changes without
+            an added or updated regression test. If no meaningful test can be
+            written, stop and explain the blocker instead of shipping an untested
+            code change.
           - Run the narrowest relevant validation command first. Broader gates come
             only after a diff exists.
           - If validation is blocked by environment setup or repeated unrelated
@@ -1178,12 +1182,81 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
 
+      - name: Quality gate regression coverage
+        if: steps.fix.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require('fs');
+          const cp = require('child_process');
+
+          const issuePath = fs.existsSync('issue-context.json')
+            ? 'issue-context.json'
+            : '/tmp/autofix-agent-artifacts/issue-context.json';
+          const issueContextMissing = !fs.existsSync(issuePath);
+          const issue = issueContextMissing ? {} : JSON.parse(fs.readFileSync(issuePath, 'utf8'));
+          const labels = (issue.labels || []).map((label) => String(label).toLowerCase());
+          const title = String(issue.title || '').toLowerCase();
+          const requiresRegression =
+            issueContextMissing ||
+            labels.some((label) => label === 'bug' || label === 'track: bug' || label.includes('bug')) ||
+            /\bbug\b|\[bug\]/i.test(title);
+
+          const tracked = cp.execSync('git diff --name-only --diff-filter=ACMRTUXB HEAD', { encoding: 'utf8' });
+          const untracked = cp.execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' });
+          const changedFiles = Array.from(new Set(
+            `${tracked}\n${untracked}`
+              .split(/\r?\n/)
+              .map((file) => file.trim())
+              .filter(Boolean)
+          ));
+
+          const isTestFile = (file) => (
+            /(^|\/)(tests?|__tests__)(\/|$)/.test(file) ||
+            /(^|\/)e2e\/.*\.(spec|test)\.[jt]sx?$/.test(file) ||
+            /(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(file) ||
+            /\.(spec|test)\.[jt]sx?$/.test(file)
+          );
+
+          const isDocOnly = (file) => /\.(md|mdx|txt|rst)$/.test(file) || /(^|\/)docs?\//.test(file);
+          const isProductionFile = (file) => {
+            if (isTestFile(file) || isDocOnly(file)) return false;
+            if (!/\.(py|js|jsx|ts|tsx|json|ya?ml|toml|sql)$/.test(file)) return false;
+            return /^(src|service|apps|packages|lib|e2e)\//.test(file);
+          };
+
+          const productionFiles = changedFiles.filter(isProductionFile);
+          const testFiles = changedFiles.filter(isTestFile);
+          const migrationFiles = changedFiles.filter((file) => /(^|\/)migrations\/\d+.*\.py$/.test(file));
+
+          const report = [
+            `requires_regression=${requiresRegression}`,
+            `issue_context_missing=${issueContextMissing}`,
+            `production_files=${productionFiles.length}`,
+            `test_files=${testFiles.length}`,
+            `migration_files=${migrationFiles.length}`,
+            '',
+            'changed_files:',
+            ...changedFiles.map((file) => `- ${file}`),
+          ].join('\n');
+          fs.writeFileSync('/tmp/autofix-regression-gate.txt', report + '\n');
+          console.log(report);
+
+          if (requiresRegression && productionFiles.length > 0 && testFiles.length === 0) {
+            console.error('::error::Bug fix changed production files without adding or updating a regression test.');
+            console.error('Add the narrowest test that would have failed before the fix, or stop for human review if the issue cannot be tested in CI.');
+            process.exit(1);
+          }
+          NODE
+
       - name: Prepare autofix diagnostics
         if: always()
         run: |
           set +e
           mkdir -p /tmp/autofix-diagnostics
           cp /tmp/claude-output.txt /tmp/autofix-diagnostics/claude-output.txt 2>/dev/null || true
+          cp /tmp/autofix-regression-gate.txt /tmp/autofix-diagnostics/regression-gate.txt 2>/dev/null || true
           cp /tmp/fix-prompt.md /tmp/autofix-diagnostics/fix-prompt.md 2>/dev/null || true
           if [ -d /tmp/autofix-agent-artifacts ]; then
             cp /tmp/autofix-agent-artifacts/* /tmp/autofix-diagnostics/ 2>/dev/null || true
