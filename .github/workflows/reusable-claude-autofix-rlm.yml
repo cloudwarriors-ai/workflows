@@ -714,10 +714,21 @@ jobs:
           git checkout -- .github/ 2>/dev/null || true
           git checkout -- .env* 2>/dev/null || true
 
-          # Remove CI analysis artifacts and dependency-install lockfile noise before
-          # deciding whether the fix branch has changes worth committing.
-          git rm -f --ignore-unmatch rlm-analysis.json .rlm-analysis.json >/dev/null 2>&1 || true
-          rm -f rlm-analysis.json .rlm-analysis.json
+          # Agent context/scout/packet files are diagnostic inputs, not product
+          # changes. Preserve a copy for artifact upload, then remove them before
+          # deciding whether there is a reviewable product diff.
+          mkdir -p /tmp/autofix-agent-artifacts
+          for artifact in \
+            rlm-analysis.json .rlm-analysis.json \
+            issue-context.md issue-context.json \
+            fix-packet.md fix-packet-meta.txt \
+            scout-*.md scout-*-meta.txt
+          do
+            [ -e "$artifact" ] || continue
+            cp "$artifact" /tmp/autofix-agent-artifacts/ 2>/dev/null || true
+            git rm -f --ignore-unmatch "$artifact" >/dev/null 2>&1 || true
+            rm -f "$artifact"
+          done
 
           MANIFEST_CHANGES=$(
             git status --porcelain -- package.json ':(glob)**/package.json' 2>/dev/null || true
@@ -761,15 +772,15 @@ jobs:
             echo "::error::Claude timed out after 20 minutes"
             exit 1
           elif [ "$MAX_TURNS_REACHED" = "true" ] && [ "$HAS_CHANGES" != "true" ]; then
-            echo "::error::Claude reached max turns before producing a diff"
+            echo "::error::Claude reached max turns before producing a product diff"
             exit 1
           elif [ $EXIT_CODE -ne 0 ] && [ "$HAS_CHANGES" != "true" ]; then
-            echo "::error::Claude failed with exit code $EXIT_CODE"
+            echo "::error::Claude failed with exit code $EXIT_CODE before producing a product diff"
             exit 1
           fi
 
           if [ "$HAS_CHANGES" != "true" ]; then
-            echo "::error::Claude completed without producing a diff"
+            echo "::error::Claude completed without producing a product diff"
             exit 1
           fi
 
@@ -793,6 +804,9 @@ jobs:
           mkdir -p /tmp/autofix-diagnostics
           cp /tmp/claude-output.txt /tmp/autofix-diagnostics/claude-output.txt 2>/dev/null || true
           cp /tmp/fix-prompt.md /tmp/autofix-diagnostics/fix-prompt.md 2>/dev/null || true
+          if [ -d /tmp/autofix-agent-artifacts ]; then
+            cp /tmp/autofix-agent-artifacts/* /tmp/autofix-diagnostics/ 2>/dev/null || true
+          fi
           cp issue-context.md issue-context.json rlm-analysis.json fix-packet.md fix-packet-meta.txt /tmp/autofix-diagnostics/ 2>/dev/null || true
           for file in scout-*.md scout-*-meta.txt; do
             [ -f "$file" ] || continue
