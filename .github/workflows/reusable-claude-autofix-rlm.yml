@@ -25,11 +25,16 @@ on:
         required: false
         type: number
         default: 60
+      rlm_model:
+        description: 'OpenRouter model to use for RLM codebase analysis'
+        required: false
+        type: string
+        default: 'anthropic/claude-sonnet-4.6'
       claude_model:
         description: 'Claude model to use. OpenRouter provider/model ID (e.g. anthropic/claude-sonnet-4.6).'
         required: false
         type: string
-        default: 'anthropic/claude-sonnet-4.6'
+        default: 'anthropic/claude-opus-4.6'
     secrets:
       ANTHROPIC_API_KEY:
         description: 'Deprecated: direct Anthropic billing. Retained optional for rollback only; not used while routing through OpenRouter.'
@@ -100,6 +105,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RLM_MAX_COST_USD: ${{ inputs.max_rlm_cost }}
+          RLM_MODEL: ${{ inputs.rlm_model }}
         run: |
           # Create RLM analysis script (ES modules)
           cat > analyze.mjs << 'EOF'
@@ -134,7 +140,7 @@ jobs:
             // Create RLM instance
             const rlm = createRLM({
               apiKey: process.env.OPENROUTER_API_KEY,
-              model: 'anthropic/claude-sonnet-4',
+              model: process.env.RLM_MODEL || 'anthropic/claude-sonnet-4.6',
               config: {
                 maxRecursionDepth: 5,
                 maxCostUsd: parseFloat(process.env.RLM_MAX_COST_USD) || 5.0,
