@@ -26,13 +26,14 @@ on:
         type: number
         default: 30
       claude_model:
-        description: 'Claude model to use'
+        description: 'Claude model to use. OpenRouter provider/model ID (e.g. anthropic/claude-sonnet-4.6).'
         required: false
         type: string
-        default: 'claude-opus-4-5-20251101'
+        default: 'anthropic/claude-sonnet-4.6'
     secrets:
       ANTHROPIC_API_KEY:
-        required: true
+        description: 'Deprecated: direct Anthropic billing. Retained optional for rollback only; not used while routing through OpenRouter.'
+        required: false
       OPENROUTER_API_KEY:
         required: true
       workflow_PAT:
@@ -360,6 +361,16 @@ jobs:
       - name: Run Claude with bypassPermissions
         id: fix
         run: |
+          # Fail closed if OpenRouter routing is not configured — never silently
+          # fall back to direct Anthropic billing.
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "::error::OPENROUTER_API_KEY is not set; refusing to run autofix without OpenRouter routing"
+            exit 1
+          fi
+          case "${{ inputs.claude_model }}" in
+            */*) : ;;
+            *) echo "::error::claude_model must be an OpenRouter provider/model ID (got '${{ inputs.claude_model }}')"; exit 1 ;;
+          esac
           set +e
           timeout 20m claude --print \
             --permission-mode bypassPermissions \
@@ -436,7 +447,12 @@ jobs:
             exit 1
           fi
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Route Claude CLI through OpenRouter (matches reusable-claude-runner /
+          # reusable-claude-issue-handler). ANTHROPIC_API_KEY blanked so the CLI
+          # uses the auth token + base URL below instead of direct Anthropic billing.
+          ANTHROPIC_API_KEY: ""
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api
 
       - name: Commit and push changes
         if: steps.fix.outputs.has_changes == 'true'
