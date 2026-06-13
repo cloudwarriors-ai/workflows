@@ -275,39 +275,61 @@ jobs:
               Keep your Python code simple - just parse the context string and call set_result().`
             );
 
+            const workspacePath = process.env.GITHUB_WORKSPACE || process.cwd();
+            const savedPath = `${workspacePath}/rlm-analysis.json`;
+            const metadata = {
+              timestamp: new Date().toISOString(),
+              filesAnalyzed: sourceFiles.length,
+              costUsd: result.usage?.costUsd || 0,
+              model: result.usage?.model || process.env.RLM_MODEL || 'unknown',
+              fallback: !result.success,
+              error: result.success ? '' : String(result.error || 'unknown RLM error')
+            };
+            const analysis = result.success ? result.answer : {
+              architecture: {
+                layers: ['deterministic fallback: RLM model analysis failed'],
+                modules: Array.from(new Set(sourceFiles.map((file) => file.split('/')[0]))).slice(0, 20),
+                mainPatterns: []
+              },
+              components: [],
+              conventions: {
+                naming: 'fallback unavailable',
+                errorHandling: 'fallback unavailable',
+                testing: 'use repo-context.md and scout reports for targeted validation',
+                logging: 'fallback unavailable'
+              },
+              qualityHotspots: [],
+              securityPatterns: [],
+              recommendations: [
+                'RLM analysis failed; downstream scouts must rely on issue context and deterministic repo search.',
+                'Treat this fallback as low-confidence context, not proof.'
+              ]
+            };
+
             if (result.success) {
-              console.log(`RLM analysis complete. Cost: $${result.usage.costUsd.toFixed(4)}`);
-
-              // Save to explicit path in GitHub workspace
-              const workspacePath = process.env.GITHUB_WORKSPACE || process.cwd();
-              const savedPath = `${workspacePath}/rlm-analysis.json`;
-
-              await writeFile(savedPath, JSON.stringify({
-                analysis: result.answer,
-                metadata: {
-                  timestamp: new Date().toISOString(),
-                  filesAnalyzed: sourceFiles.length,
-                  costUsd: result.usage.costUsd,
-                  model: result.usage.model
-                }
-              }, null, 2));
-
-              console.log(`Analysis saved to ${savedPath}`);
-              console.log('Current working directory:', process.cwd());
-              console.log('GITHUB_WORKSPACE:', workspacePath);
-
-              // Verify file was written
-              try {
-                const stats = await readFile(savedPath, 'utf-8');
-                console.log(`File verified, size: ${stats.length} bytes`);
-              } catch (err) {
-                console.error('File verification failed:', err);
-              }
-
-              return savedPath;
+              console.log(`RLM analysis complete. Cost: $${metadata.costUsd.toFixed(4)}`);
             } else {
-              throw new Error(`RLM analysis failed: ${result.error}`);
+              console.error(`RLM analysis failed; writing explicit fallback artifact: ${metadata.error}`);
             }
+
+            await writeFile(savedPath, JSON.stringify({
+              analysis,
+              metadata
+            }, null, 2));
+
+            console.log(`Analysis saved to ${savedPath}`);
+            console.log('Current working directory:', process.cwd());
+            console.log('GITHUB_WORKSPACE:', workspacePath);
+
+            // Verify file was written
+            try {
+              const stats = await readFile(savedPath, 'utf-8');
+              console.log(`File verified, size: ${stats.length} bytes`);
+            } catch (err) {
+              console.error('File verification failed:', err);
+            }
+
+            return savedPath;
           }
 
           analyzeCodebase().catch(err => {
