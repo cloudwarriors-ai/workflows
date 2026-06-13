@@ -54,6 +54,13 @@ on:
       workflow_PAT:
         description: 'Personal access token for PR creation (needed for reusable workflows)'
         required: false
+    outputs:
+      already_fixed:
+        description: 'true when the base branch already satisfies the issue and no PR is needed'
+        value: ${{ jobs.claude-autofix.outputs.already_fixed }}
+      already_fixed_reason:
+        description: 'machine-readable reason for an already-fixed no-op result'
+        value: ${{ jobs.claude-autofix.outputs.already_fixed_reason }}
 
 # Prevent concurrent runs on the same issue
 concurrency:
@@ -939,6 +946,9 @@ jobs:
     needs: [issue-context, rlm-analysis, repo-context, scout, packet-synthesis]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      already_fixed: ${{ steps.fix.outputs.already_fixed }}
+      already_fixed_reason: ${{ steps.fix.outputs.already_fixed_reason }}
     permissions:
       contents: write
       pull-requests: write
@@ -1021,6 +1031,13 @@ jobs:
             rlm-analysis.json, repo-context.md, and the specific files/globs
             named by the packet.
           - Use rg and targeted reads only when needed to resolve a concrete blocker.
+          - Before editing, compare the issue's expected behavior against the
+            current base branch code and existing regression tests. Prefer an
+            existing validated solution over inventing a second implementation.
+          - If the base branch already satisfies the issue, do not make a product
+            diff. Create `.autofix/already-fixed.md` with:
+            `issue_summary`, `existing_solution_evidence`, `regression_evidence`,
+            `validation_command`, and `why_no_pr_needed`, then stop.
           - Edit early. Once the likely cause is confirmed, make the minimal fix before
             running broad validation.
           - Add or update the smallest meaningful regression test when feasible.
@@ -1115,6 +1132,29 @@ jobs:
             rm -f "$artifact"
           done
 
+          ALREADY_FIXED=false
+          ALREADY_FIXED_REASON=""
+          if [ -f ".autofix/already-fixed.md" ]; then
+            cp ".autofix/already-fixed.md" /tmp/autofix-agent-artifacts/already-fixed.md 2>/dev/null || true
+            already_fixed_bytes=$(wc -c < ".autofix/already-fixed.md" | tr -d ' ')
+            if [ "$already_fixed_bytes" -ge 250 ] &&
+              grep -q 'issue_summary' ".autofix/already-fixed.md" &&
+              grep -q 'existing_solution_evidence' ".autofix/already-fixed.md" &&
+              grep -q 'regression_evidence' ".autofix/already-fixed.md" &&
+              grep -q 'validation_command' ".autofix/already-fixed.md" &&
+              grep -q 'why_no_pr_needed' ".autofix/already-fixed.md"; then
+              ALREADY_FIXED=true
+              ALREADY_FIXED_REASON="base_already_satisfies_issue"
+            else
+              echo "::error::.autofix/already-fixed.md is missing required evidence sections"
+              sed -n '1,160p' ".autofix/already-fixed.md" || true
+              exit 1
+            fi
+            git rm -f --ignore-unmatch ".autofix/already-fixed.md" >/dev/null 2>&1 || true
+            rm -f ".autofix/already-fixed.md"
+            rmdir ".autofix" 2>/dev/null || true
+          fi
+
           MANIFEST_CHANGES=$(
             git status --porcelain -- package.json ':(glob)**/package.json' 2>/dev/null || true
           )
@@ -1150,11 +1190,25 @@ jobs:
           fi
 
           echo "has_changes=$HAS_CHANGES" >> "$GITHUB_OUTPUT"
+          echo "already_fixed=$ALREADY_FIXED" >> "$GITHUB_OUTPUT"
+          echo "already_fixed_reason=$ALREADY_FIXED_REASON" >> "$GITHUB_OUTPUT"
           echo "max_turns_reached=$MAX_TURNS_REACHED" >> "$GITHUB_OUTPUT"
           echo "claude_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
+          if [ "$ALREADY_FIXED" = "true" ] && [ "$HAS_CHANGES" = "true" ]; then
+            echo "::error::Writer reported already-fixed but also left a product diff"
+            git status --porcelain
+            exit 1
+          fi
+
           if [ $EXIT_CODE -eq 124 ]; then
             echo "::error::Claude timed out after 20 minutes"
+            exit 1
+          elif [ "$ALREADY_FIXED" = "true" ] && [ "$MAX_TURNS_REACHED" = "true" ]; then
+            echo "::error::Claude reached max turns while reporting already-fixed; evidence is not trusted"
+            exit 1
+          elif [ "$ALREADY_FIXED" = "true" ] && [ $EXIT_CODE -ne 0 ]; then
+            echo "::error::Claude exited with $EXIT_CODE while reporting already-fixed; evidence is not trusted"
             exit 1
           elif [ "$MAX_TURNS_REACHED" = "true" ] && [ "$HAS_CHANGES" != "true" ]; then
             echo "::error::Claude reached max turns before producing a product diff"
@@ -1165,8 +1219,13 @@ jobs:
           fi
 
           if [ "$HAS_CHANGES" != "true" ]; then
-            echo "::error::Claude completed without producing a product diff"
-            exit 1
+            if [ "$ALREADY_FIXED" = "true" ]; then
+              echo "::notice::Base branch already satisfies the issue; no product diff or PR is needed"
+              exit 0
+            else
+              echo "::error::Claude completed without producing a product diff"
+              exit 1
+            fi
           fi
 
           if [ "$MAX_TURNS_REACHED" = "true" ]; then
@@ -1313,6 +1372,34 @@ jobs:
               repo: context.repo.repo,
               issue_number: ${{ inputs.issue_number }},
               body
+            });
+
+      - name: Comment already fixed
+        if: steps.fix.outputs.already_fixed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const evidencePath = '/tmp/autofix-agent-artifacts/already-fixed.md';
+            const evidence = fs.existsSync(evidencePath)
+              ? fs.readFileSync(evidencePath, 'utf8').slice(0, 5000)
+              : '_Already-fixed evidence artifact was not found._';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: [
+                '✅ Auto-fix stopped: base branch already appears to satisfy this issue.',
+                '',
+                'No fix branch or PR was created.',
+                '',
+                '<details><summary>Evidence</summary>',
+                '',
+                evidence,
+                '',
+                '</details>',
+              ].join('\n'),
             });
 
       - name: Remove lock label
