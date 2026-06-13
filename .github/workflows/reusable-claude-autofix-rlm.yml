@@ -849,7 +849,7 @@ jobs:
               printf 'Issue #%s: %s\n' "${{ inputs.issue_number }}" "$issue_title"
               echo
               echo "## likely_root_cause"
-              echo "Scout analysis located the Additional Notes card and the wizard field rendering path. Treat scout findings as hypotheses to verify before editing."
+              echo "Scout analysis located candidate code paths. Treat scout findings as hypotheses to verify before editing."
               echo
               echo "## allowed_files_or_globs"
               if [ -n "$candidate_paths" ]; then
@@ -868,11 +868,12 @@ jobs:
               echo "- generated lockfiles unless package manifests change"
               echo
               echo "## patch_plan"
-              echo "1. Inspect the Additional Notes field definition and the frontend renderer path named by the scouts."
-              echo "2. Confirm whether the live field is missing because of field type mismatch, answer-key mismatch, disabled/readOnly state, or missing onChange propagation."
-              echo "3. Make the smallest frontend/backend fix that allows the notes field to accept and persist input."
-              echo "4. Add or update the narrowest regression test around the confirmed broken path."
-              echo "5. Run the targeted validation command before broader gates."
+              echo "1. Inspect the specific files and regression tests named by the scouts before editing."
+              echo "2. If current base code and tests already satisfy the issue, stop with already-fixed evidence instead of creating a compatibility workaround."
+              echo "3. Confirm the broken path from canonical source data through the rendered/output behavior."
+              echo "4. Make the smallest fix at the canonical source of truth; do not broaden adapters/renderers to accept an old invalid shape unless the issue explicitly requires backward compatibility."
+              echo "5. Add or update the narrowest regression test around the confirmed broken path."
+              echo "6. Run the targeted validation command before broader gates."
               echo
               echo "## targeted_validation_commands"
               if [ -n "$validation_commands" ]; then
@@ -884,6 +885,8 @@ jobs:
               echo
               echo "## stop_conditions"
               echo "- Stop if the issue requires live credentials or preview-only browser state unavailable to CI."
+              echo "- Stop if canonical source code plus existing regression tests already cover the issue; write .autofix/already-fixed.md."
+              echo "- Stop if the only available change is a defensive compatibility fallback for an invalid legacy value without proving the canonical source remains broken."
               echo "- Stop if validation failures are unrelated to the touched files and preserve the useful diff."
               echo
               echo "## confidence"
@@ -1056,6 +1059,14 @@ jobs:
           - Before editing, compare the issue's expected behavior against the
             current base branch code and existing regression tests. Prefer an
             existing validated solution over inventing a second implementation.
+          - If an artifact says the bug was already fixed or points to an
+            existing regression test for the same failure mode, inspect that
+            code/test before editing. If it covers the issue, use the
+            already-fixed path.
+          - Do not make compatibility fallbacks that accept the old invalid data
+            shape as the primary fix when canonical source code, migrations,
+            seeds, or tests already define the expected shape. Fix the
+            canonical source or report already-fixed instead.
           - If the base branch already satisfies the issue, do not make a product
             diff. Create `.autofix/already-fixed.md` with:
             `issue_summary`, `existing_solution_evidence`, `regression_evidence`,
@@ -1124,7 +1135,7 @@ jobs:
             --permission-mode bypassPermissions \
             --max-turns ${{ inputs.max_claude_turns }} \
             --model ${{ inputs.claude_model }} \
-            --append-system-prompt "You are in patch-first mode. Produce a focused, reviewable branch before broad exploration. Follow repository instructions and stop when the best useful diff is ready." \
+            --append-system-prompt "You are in patch-first mode, but a max-turn partial result is rejected by the pipeline. Decide quickly whether the issue is already fixed on the base branch; otherwise produce one focused, validated diff and stop." \
             "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/claude-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
@@ -1232,8 +1243,8 @@ jobs:
           elif [ "$ALREADY_FIXED" = "true" ] && [ $EXIT_CODE -ne 0 ]; then
             echo "::error::Claude exited with $EXIT_CODE while reporting already-fixed; evidence is not trusted"
             exit 1
-          elif [ "$MAX_TURNS_REACHED" = "true" ] && [ "$HAS_CHANGES" != "true" ]; then
-            echo "::error::Claude reached max turns before producing a product diff"
+          elif [ "$MAX_TURNS_REACHED" = "true" ]; then
+            echo "::error::Claude reached max turns; refusing to trust or promote a partial autofix branch"
             exit 1
           elif [ $EXIT_CODE -ne 0 ] && [ "$HAS_CHANGES" != "true" ]; then
             echo "::error::Claude failed with exit code $EXIT_CODE before producing a product diff"
