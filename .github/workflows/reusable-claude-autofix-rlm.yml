@@ -339,12 +339,154 @@ jobs:
               body: '🔍 RLM codebase analysis complete. Starting bounded scout workflow...'
             });
 
+  # Step 1.5: Build cheap deterministic search context so downstream agents do
+  # not burn turns just locating likely files.
+  repo-context:
+    name: Repo Search Context
+    needs: issue-context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+          fetch-depth: 0
+
+      - name: Download issue context
+        uses: actions/download-artifact@v4
+        with:
+          name: issue-context
+
+      - name: Build repo search context
+        run: |
+          set -euo pipefail
+
+          node <<'NODE'
+          const fs = require('fs');
+          const issue = JSON.parse(fs.readFileSync('issue-context.json', 'utf8'));
+          const raw = `${issue.title || ''}\n${issue.body || ''}`;
+          const patterns = new Set();
+          const stop = new Set([
+            'type', 'severity', 'summary', 'actual', 'expected', 'notes',
+            'steps', 'reproduce', 'submitted', 'shadow', 'issue', 'bug',
+            'high', 'medium', 'low', 'click', 'into', 'field', 'input',
+            'text', 'flow', 'cannot', 'entered', 'accepts', 'accept',
+            'check', 'state', 'session', 'sow', 'user', 'content',
+            'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into',
+            'in', 'no', 'github', 'com', 'cloudwarriors', 'ai', 'scopely',
+          ]);
+
+          const add = (value) => {
+            const text = String(value || '').trim().replace(/:$/, '').replace(/\s+/g, ' ');
+            if (!text || text.length < 4) return;
+            if (/github\.com|cloudwarriors-ai\//i.test(text)) return;
+            const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+            if (words.length && words.every((word) => stop.has(word))) return;
+            if (stop.has(text.toLowerCase())) return;
+            if (/^(the|and|for|with|from|that|this|into)$/i.test(text)) return;
+            patterns.add(text.slice(0, 80));
+          };
+
+          for (const match of raw.matchAll(/\*\*([^*]{3,80})\*\*/g)) add(match[1]);
+          for (const match of raw.matchAll(/`([^`]{3,80})`/g)) add(match[1]);
+          for (const match of raw.matchAll(/[A-Z][A-Za-z0-9]+(?:[ \t]+[A-Z][A-Za-z0-9]+){1,3}/g)) add(match[0]);
+          for (const word of raw.match(/[A-Za-z][A-Za-z0-9_/-]{3,}/g) || []) {
+            if (/[A-Z].*[A-Z]|[_/-]/.test(word)) add(word);
+          }
+
+          for (const phrase of Array.from(patterns)) {
+            const camel = phrase.replace(/[^A-Za-z0-9]+(.)/g, (_, c) => c.toUpperCase());
+            const snake = phrase.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+            add(camel);
+            add(snake);
+          }
+
+          ['WizardProvider', 'ScopingCard', 'textarea', 'readOnly', 'disabled', 'onChange', 'additional_notes', 'additionalNotes'].forEach(add);
+          fs.writeFileSync('/tmp/autofix-search-patterns.txt', Array.from(patterns).slice(0, 24).join('\n') + '\n');
+          NODE
+
+          {
+            echo "# Repo Search Context"
+            echo
+            echo "Generated from sanitized issue terms. Treat matches as hints, not proof."
+            echo
+            echo "## Search Patterns"
+            sed -n '1,80p' /tmp/autofix-search-patterns.txt
+            echo
+            echo "## Focused Match Snippets"
+          } > repo-context.md
+
+          while IFS= read -r pattern; do
+            [ -n "$pattern" ] || continue
+            {
+              echo
+              printf '### %s\n' "$pattern"
+            } >> repo-context.md
+
+            set +e
+            matches=$(rg -n -i --fixed-strings \
+              --glob '!node_modules' \
+              --glob '!dist' \
+              --glob '!build' \
+              --glob '!coverage' \
+              --glob '!*.map' \
+              -- "$pattern" . 2>/dev/null | head -25)
+            set -e
+
+            if [ -n "$matches" ]; then
+              printf '%s\n' "$matches" >> repo-context.md
+            else
+              echo "(no matches)" >> repo-context.md
+            fi
+          done < /tmp/autofix-search-patterns.txt
+
+          {
+            echo
+            echo "## Candidate File Globs"
+            set +e
+            candidate_files=$(rg --files \
+              -g '!node_modules' \
+              -g '!dist' \
+              -g '!build' \
+              -g '!coverage' \
+              -g '!*.map' |
+              rg -i 'wizard|scope|scoping|session|sow|notes|ucaas|migration|card|form|provider' |
+              head -80)
+            set -e
+            printf '%s\n' "$candidate_files"
+          } >> repo-context.md
+
+          repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')
+          if [ "$repo_context_bytes" -gt 80000 ]; then
+            head -c 80000 repo-context.md > repo-context.trimmed
+            {
+              echo
+              echo
+              echo "[repo-context truncated to 80000 bytes]"
+            } >> repo-context.trimmed
+            mv repo-context.trimmed repo-context.md
+          fi
+
+          {
+            echo "patterns=$(wc -l < /tmp/autofix-search-patterns.txt | tr -d ' ')"
+            echo "repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')"
+          } > repo-context-meta.txt
+
+      - name: Upload repo search context
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-context
+          path: |
+            repo-context.md
+            repo-context-meta.txt
+          retention-days: 7
+
   # Step 2: Run bounded read-only scouts in parallel. Scouts are allowed to use
   # tools, but any workspace changes they make are discarded and surfaced as a
   # warning. Their only contract is a compact artifact for the fixer.
   scout:
     name: "Scout (${{ matrix.role }})"
-    needs: [issue-context, rlm-analysis]
+    needs: [issue-context, rlm-analysis, repo-context]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
@@ -375,6 +517,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rlm-analysis
+
+      - name: Download repo context
+        uses: actions/download-artifact@v4
+        with:
+          name: repo-context
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -409,9 +556,11 @@ jobs:
           Inputs available in the workspace:
           - issue-context.md: sanitized issue title/body
           - rlm-analysis.json: broad codebase analysis
+          - repo-context.md: deterministic search hits and candidate files
 
           Rules:
           - Do not edit files.
+          - Start from repo-context.md. If it has enough evidence, do not search.
           - Prefer rg and targeted reads over broad exploration.
           - Spend at most 4 targeted searches/reads before writing conclusions.
           - If you cannot identify the exact files quickly, output low confidence
@@ -473,7 +622,7 @@ jobs:
   # consume this packet instead of re-discovering the whole repository.
   packet-synthesis:
     name: Fix Packet Synthesis
-    needs: [issue-context, rlm-analysis, scout]
+    needs: [issue-context, rlm-analysis, repo-context, scout]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -486,6 +635,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rlm-analysis
+
+      - name: Download repo context
+        uses: actions/download-artifact@v4
+        with:
+          name: repo-context
 
       - name: Download scout artifacts
         uses: actions/download-artifact@v4
@@ -517,6 +671,10 @@ jobs:
 
           total_scouts=0
           usable_scouts=0
+          repo_context_bytes=0
+          if [ -f repo-context.md ]; then
+            repo_context_bytes=$(wc -c < repo-context.md | tr -d ' ')
+          fi
           for meta in scout-*-meta.txt; do
             [ -f "$meta" ] || continue
             total_scouts=$((total_scouts + 1))
@@ -525,11 +683,11 @@ jobs:
             fi
           done
 
-          if [ "$usable_scouts" -eq 0 ]; then
+          if [ "$usable_scouts" -eq 0 ] && [ "$repo_context_bytes" -lt 500 ]; then
             {
               echo "# Fix packet unavailable"
               echo
-              echo "No usable scout reports were produced, so the writer was not run."
+              echo "No usable scout reports or repo-search context were produced, so the writer was not run."
               echo "This prevents wasting the expensive fix model on an empty handoff."
             } > fix-packet.md
             {
@@ -538,12 +696,15 @@ jobs:
               echo "exit_code=0"
               echo "total_scouts=${total_scouts}"
               echo "usable_scouts=${usable_scouts}"
+              echo "repo_context_bytes=${repo_context_bytes}"
               echo "packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')"
               echo "packet_ready=false"
-              echo "failure_reason=no_usable_scouts"
+              echo "failure_reason=no_usable_scouts_or_repo_context"
             } > fix-packet-meta.txt
-            echo "::warning::No usable scout reports were produced; writer will be skipped"
+            echo "::warning::No usable scout reports or repo context were produced; writer will be skipped"
             exit 0
+          elif [ "$usable_scouts" -eq 0 ]; then
+            echo "::warning::No usable scout reports were produced; synthesizing packet from repo-search context"
           fi
 
           cat > /tmp/packet-prompt.md <<'EOF'
@@ -552,9 +713,11 @@ jobs:
           Inputs available:
           - issue-context.md
           - rlm-analysis.json
+          - repo-context.md and repo-context-meta.txt
           - scout-*.md and scout-*-meta.txt
 
           Do not inspect a repository. Use only these artifacts.
+          If scout reports are max-turn errors, rely on repo-context.md.
           Produce a compact Markdown packet for the fixer with:
           - issue_summary
           - likely_root_cause
@@ -574,6 +737,10 @@ jobs:
             cat issue-context.md
             printf '\n\n## RLM Analysis\n'
             cat rlm-analysis.json
+            printf '\n\n## Repo Search Context\n'
+            cat repo-context.md
+            printf '\n\n## Repo Context Metadata\n'
+            cat repo-context-meta.txt
             printf '\n\n## Scout Reports\n'
             for file in scout-*.md scout-*-meta.txt; do
               [ -f "$file" ] || continue
@@ -597,6 +764,7 @@ jobs:
             echo "exit_code=${status}"
             echo "total_scouts=${total_scouts}"
             echo "usable_scouts=${usable_scouts}"
+            echo "repo_context_bytes=${repo_context_bytes}"
             packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
             echo "packet_bytes=${packet_bytes}"
             packet_ready=false
@@ -632,7 +800,7 @@ jobs:
   # Step 4: Claude Auto-Fix with scout packet
   claude-autofix:
     name: Claude Adversarial Auto-Fix
-    needs: [issue-context, rlm-analysis, scout, packet-synthesis]
+    needs: [issue-context, rlm-analysis, repo-context, scout, packet-synthesis]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -656,6 +824,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rlm-analysis
+
+      - name: Download repo context
+        uses: actions/download-artifact@v4
+        with:
+          name: repo-context
 
       - name: Download scout artifacts
         uses: actions/download-artifact@v4
@@ -709,7 +882,8 @@ jobs:
 
           Operating rules:
           - Start from fix-packet.md. Read only the packet, issue-context.md,
-            rlm-analysis.json, and the specific files/globs named by the packet.
+            rlm-analysis.json, repo-context.md, and the specific files/globs
+            named by the packet.
           - Use rg and targeted reads only when needed to resolve a concrete blocker.
           - Edit early. Once the likely cause is confirmed, make the minimal fix before
             running broad validation.
@@ -735,6 +909,8 @@ jobs:
             cat issue-context.md
             printf '\n\n## RLM Analysis\n'
             cat rlm-analysis.json
+            printf '\n\n## Repo Search Context\n'
+            cat repo-context.md
             printf '\n\n## Scout Reports\n'
             for file in scout-*.md scout-*-meta.txt; do
               [ -f "$file" ] || continue
@@ -789,6 +965,7 @@ jobs:
           for artifact in \
             rlm-analysis.json .rlm-analysis.json \
             issue-context.md issue-context.json \
+            repo-context.md repo-context-meta.txt \
             fix-packet.md fix-packet-meta.txt \
             scout-*.md scout-*-meta.txt
           do
@@ -875,7 +1052,7 @@ jobs:
           if [ -d /tmp/autofix-agent-artifacts ]; then
             cp /tmp/autofix-agent-artifacts/* /tmp/autofix-diagnostics/ 2>/dev/null || true
           fi
-          cp issue-context.md issue-context.json rlm-analysis.json fix-packet.md fix-packet-meta.txt /tmp/autofix-diagnostics/ 2>/dev/null || true
+          cp issue-context.md issue-context.json rlm-analysis.json repo-context.md repo-context-meta.txt fix-packet.md fix-packet-meta.txt /tmp/autofix-diagnostics/ 2>/dev/null || true
           for file in scout-*.md scout-*-meta.txt; do
             [ -f "$file" ] || continue
             cp "$file" /tmp/autofix-diagnostics/
