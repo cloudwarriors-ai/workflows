@@ -39,12 +39,12 @@ on:
         description: 'Maximum Claude turns for each read-only scout'
         required: false
         type: number
-        default: 10
+        default: 16
       packet_turns:
         description: 'Maximum Claude turns for fix-packet synthesis'
         required: false
         type: number
-        default: 8
+        default: 12
     secrets:
       ANTHROPIC_API_KEY:
         description: 'Deprecated: direct Anthropic billing. Retained optional for rollback only; not used while routing through OpenRouter.'
@@ -413,7 +413,9 @@ jobs:
           Rules:
           - Do not edit files.
           - Prefer rg and targeted reads over broad exploration.
-          - Spend at most a handful of searches before writing conclusions.
+          - Spend at most 4 targeted searches/reads before writing conclusions.
+          - If you cannot identify the exact files quickly, output low confidence
+            findings instead of continuing exploration.
           - Output a compact Markdown report with:
             1. likely_files
             2. likely_symbols
@@ -437,6 +439,15 @@ jobs:
             echo "model=${SCOUT_MODEL}"
             echo "turns=${SCOUT_TURNS}"
             echo "exit_code=${status}"
+            report_bytes=$(wc -c < "scout-${SCOUT_ROLE}.md" | tr -d ' ')
+            echo "report_bytes=${report_bytes}"
+            if [ "$status" -eq 0 ] &&
+              [ "$report_bytes" -ge 200 ] &&
+              ! grep -qi "Reached max turns" "scout-${SCOUT_ROLE}.md"; then
+              echo "usable=true"
+            else
+              echo "usable=false"
+            fi
             git status --porcelain
           } > "scout-${SCOUT_ROLE}-meta.txt"
 
@@ -504,6 +515,37 @@ jobs:
             exit 1
           fi
 
+          total_scouts=0
+          usable_scouts=0
+          for meta in scout-*-meta.txt; do
+            [ -f "$meta" ] || continue
+            total_scouts=$((total_scouts + 1))
+            if grep -q '^usable=true$' "$meta"; then
+              usable_scouts=$((usable_scouts + 1))
+            fi
+          done
+
+          if [ "$usable_scouts" -eq 0 ]; then
+            {
+              echo "# Fix packet unavailable"
+              echo
+              echo "No usable scout reports were produced, so the writer was not run."
+              echo "This prevents wasting the expensive fix model on an empty handoff."
+            } > fix-packet.md
+            {
+              echo "model=${PACKET_MODEL}"
+              echo "turns=${PACKET_TURNS}"
+              echo "exit_code=0"
+              echo "total_scouts=${total_scouts}"
+              echo "usable_scouts=${usable_scouts}"
+              echo "packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')"
+              echo "packet_ready=false"
+              echo "failure_reason=no_usable_scouts"
+            } > fix-packet-meta.txt
+            echo "::warning::No usable scout reports were produced; writer will be skipped"
+            exit 0
+          fi
+
           cat > /tmp/packet-prompt.md <<'EOF'
           You are a fix-packet synthesizer for an automated code fix pipeline.
 
@@ -553,10 +595,27 @@ jobs:
             echo "model=${PACKET_MODEL}"
             echo "turns=${PACKET_TURNS}"
             echo "exit_code=${status}"
+            echo "total_scouts=${total_scouts}"
+            echo "usable_scouts=${usable_scouts}"
+            packet_bytes=$(wc -c < fix-packet.md | tr -d ' ')
+            echo "packet_bytes=${packet_bytes}"
+            packet_ready=false
+            if [ "$status" -eq 0 ] &&
+              [ "$packet_bytes" -ge 250 ] &&
+              grep -q 'allowed_files_or_globs' fix-packet.md &&
+              grep -q 'patch_plan' fix-packet.md &&
+              grep -q 'targeted_validation_commands' fix-packet.md &&
+              ! grep -qi "Reached max turns" fix-packet.md; then
+              packet_ready=true
+            fi
+            echo "packet_ready=${packet_ready}"
           } > fix-packet-meta.txt
 
           if [ "$status" -ne 0 ]; then
-            echo "::warning::Packet synthesis exited with ${status}; continuing with partial packet"
+            echo "::warning::Packet synthesis exited with ${status}; writer will be skipped unless packet_ready=true"
+          fi
+          if ! grep -q '^packet_ready=true$' fix-packet-meta.txt; then
+            echo "::warning::Packet synthesis did not produce an actionable packet; writer will fail before invoking Claude"
           fi
 
       - name: Upload fix packet
@@ -608,6 +667,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: fix-packet
+
+      - name: Validate fix packet
+        run: |
+          set -euo pipefail
+          if ! grep -q '^packet_ready=true$' fix-packet-meta.txt; then
+            echo "::error::Fix packet is not actionable; refusing to invoke the writer model"
+            cat fix-packet-meta.txt
+            exit 1
+          fi
 
       - name: Setup Node.js and install Claude Code
         uses: actions/setup-node@v4
