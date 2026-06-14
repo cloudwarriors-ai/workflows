@@ -230,17 +230,21 @@ jobs:
               },
             });
 
-            // Analyze with RLM
-            console.log('Starting RLM analysis...');
-            const result = await rlm.query(
-              context,
-              `You have access to a codebase provided in the 'context' variable as a string.
+            // Analyze with RLM. OpenRouter can return otherwise useful model
+            // output that the RLM sandbox rejects if the generated Python uses
+            // forbidden helpers. Give the model one stricter repair attempt,
+            // then fail closed instead of handing weak fallback context to the
+            // expensive writer.
+            const primaryPrompt = `You have access to a codebase provided in the 'context' variable as a string.
 
               IMPORTANT: Only use these Python tools:
               - context (string variable with all file contents)
               - set_result(data) to return your analysis
               - Standard modules: json, re, collections
               - NO custom functions - use only built-in string methods and regex
+              - DO NOT use dir(), eval(), exec(), hasattr(), getattr(), globals(),
+                locals(), vars(), __builtins__, builtins, open(), compile(), or
+                imports outside json/re/collections
 
               Write simple Python code to analyze the codebase and call set_result() with a JSON object.
 
@@ -272,8 +276,40 @@ jobs:
                 "recommendations": ["best practices to follow"]
               }
 
-              Keep your Python code simple - just parse the context string and call set_result().`
-            );
+              Keep your Python code simple - just parse the context string and call set_result().`;
+
+            const repairPrompt = `Your previous RLM code was rejected by the sandbox.
+
+              Return ONLY simple Python code that:
+              - imports at most: json, re, collections
+              - reads only the provided context string
+              - does not call dir/eval/exec/hasattr/getattr/globals/locals/vars
+              - does not inspect Python builtins or import builtins
+              - does not define functions or classes
+              - calls set_result(data) exactly once with this shape:
+                {
+                  "architecture": {"layers": [], "modules": [], "mainPatterns": []},
+                  "components": [],
+                  "conventions": {"naming": "", "errorHandling": "", "testing": "", "logging": ""},
+                  "qualityHotspots": [],
+                  "securityPatterns": [],
+                  "recommendations": []
+                }
+
+              Use regex and string splitting only. Prefer a small valid answer over a clever one.`;
+
+            console.log('Starting RLM analysis...');
+            let result = await rlm.query(context, primaryPrompt);
+            let repaired = false;
+            const firstError = String(result.error || '');
+            if (
+              !result.success &&
+              /Code validation failed|Forbidden builtin|Import not in allowlist/i.test(firstError)
+            ) {
+              repaired = true;
+              console.error(`RLM analysis failed validation; retrying with strict repair prompt: ${firstError}`);
+              result = await rlm.query(context, repairPrompt);
+            }
 
             const workspacePath = process.env.GITHUB_WORKSPACE || process.cwd();
             const savedPath = `${workspacePath}/rlm-analysis.json`;
@@ -282,35 +318,21 @@ jobs:
               filesAnalyzed: sourceFiles.length,
               costUsd: result.usage?.costUsd || 0,
               model: result.usage?.model || process.env.RLM_MODEL || 'unknown',
-              fallback: !result.success,
+              fallback: false,
+              repaired,
               error: result.success ? '' : String(result.error || 'unknown RLM error')
             };
-            const analysis = result.success ? result.answer : {
-              architecture: {
-                layers: ['deterministic fallback: RLM model analysis failed'],
-                modules: Array.from(new Set(sourceFiles.map((file) => file.split('/')[0]))).slice(0, 20),
-                mainPatterns: []
-              },
-              components: [],
-              conventions: {
-                naming: 'fallback unavailable',
-                errorHandling: 'fallback unavailable',
-                testing: 'use repo-context.md and scout reports for targeted validation',
-                logging: 'fallback unavailable'
-              },
-              qualityHotspots: [],
-              securityPatterns: [],
-              recommendations: [
-                'RLM analysis failed; downstream scouts must rely on issue context and deterministic repo search.',
-                'Treat this fallback as low-confidence context, not proof.'
-              ]
-            };
 
-            if (result.success) {
-              console.log(`RLM analysis complete. Cost: $${metadata.costUsd.toFixed(4)}`);
-            } else {
-              console.error(`RLM analysis failed; writing explicit fallback artifact: ${metadata.error}`);
+            if (!result.success) {
+              throw new Error(`RLM analysis failed after repair attempt: ${metadata.error}`);
             }
+
+            const analysis = result.answer;
+            if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) {
+              throw new Error('RLM analysis did not return a JSON object');
+            }
+
+            console.log(`RLM analysis complete. Cost: $${metadata.costUsd.toFixed(4)} repaired=${repaired}`);
 
             await writeFile(savedPath, JSON.stringify({
               analysis,
@@ -613,7 +635,7 @@ jobs:
             --permission-mode bypassPermissions \
             --max-turns "$SCOUT_TURNS" \
             --model "$SCOUT_MODEL" \
-            "$(cat /tmp/scout-prompt.md)" 2>&1 | tee "scout-${SCOUT_ROLE}.md"
+            < /tmp/scout-prompt.md 2>&1 | tee "scout-${SCOUT_ROLE}.md"
           status=${PIPESTATUS[0]}
           set -e
 
@@ -798,7 +820,7 @@ jobs:
             --permission-mode bypassPermissions \
             --max-turns "$PACKET_TURNS" \
             --model "$PACKET_MODEL" \
-            "$(cat /tmp/packet-full-prompt.md)" 2>&1 | tee fix-packet.md
+            < /tmp/packet-full-prompt.md 2>&1 | tee fix-packet.md
           status=${PIPESTATUS[0]}
           set -e
 
@@ -1093,22 +1115,43 @@ jobs:
             a complete fix.
           EOF
 
-            printf '\n\n## Fix Packet\n'
-            cat fix-packet.md
-            printf '\n\n## Issue Context\n'
-            cat issue-context.md
-            printf '\n\n## RLM Analysis\n'
-            cat rlm-analysis.json
-            printf '\n\n## Repo Search Context\n'
-            cat repo-context.md
+            append_excerpt() {
+              local heading="$1"
+              local file="$2"
+              local max_bytes="$3"
+
+              [ -f "$file" ] || return 0
+              printf '\n\n%s\n' "$heading"
+
+              local bytes
+              bytes="$(wc -c < "$file" | tr -d ' ')"
+              if [ "$bytes" -le "$max_bytes" ]; then
+                cat "$file"
+                return 0
+              fi
+
+              printf '_Excerpt only: %s is %s bytes; showing first %s bytes. Use targeted reads only if this excerpt points to a concrete blocker._\n\n' "$file" "$bytes" "$max_bytes"
+              head -c "$max_bytes" "$file"
+              printf '\n\n_[truncated]_\n'
+            }
+
+            append_excerpt '## Fix Packet (Primary Plan)' fix-packet.md 32000
+            append_excerpt '## Issue Context' issue-context.md 12000
+            append_excerpt '## RLM Analysis' rlm-analysis.json 12000
+            append_excerpt '## Repo Search Context' repo-context.md 18000
+
             printf '\n\n## Scout Reports\n'
-            for file in scout-*.md scout-*-meta.txt; do
+            for file in scout-*.md; do
               [ -f "$file" ] || continue
-              printf '\n\n### %s\n' "$file"
-              cat "$file"
+              append_excerpt "### ${file}" "$file" 8000
+            done
+            for file in scout-*-meta.txt; do
+              [ -f "$file" ] || continue
+              append_excerpt "### ${file}" "$file" 3000
             done
           } > /tmp/fix-prompt.md
-          echo "Packet-based prompt written to /tmp/fix-prompt.md"
+          bytes="$(wc -c < /tmp/fix-prompt.md | tr -d ' ')"
+          echo "Packet-based prompt written to /tmp/fix-prompt.md (${bytes} bytes)"
 
       - name: Create feature branch
         id: branch
@@ -1136,7 +1179,7 @@ jobs:
             --max-turns ${{ inputs.max_claude_turns }} \
             --model ${{ inputs.claude_model }} \
             --append-system-prompt "You are in patch-first mode, but a max-turn partial result is rejected by the pipeline. Decide quickly whether the issue is already fixed on the base branch; otherwise produce one focused, validated diff and stop." \
-            "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/claude-output.txt
+            < /tmp/fix-prompt.md 2>&1 | tee /tmp/claude-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           MAX_TURNS_REACHED=false
