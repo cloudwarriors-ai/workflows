@@ -25,13 +25,23 @@ on:
         required: false
         type: number
         default: 60
+      claude_provider:
+        description: 'Provider for Claude Code scout/packet/writer stages: openrouter or anthropic. RLM analysis still requires OpenRouter.'
+        required: false
+        type: string
+        default: 'openrouter'
       rlm_model:
         description: 'OpenRouter model to use for RLM codebase analysis'
         required: false
         type: string
         default: 'anthropic/claude-sonnet-4.6'
+      scout_model:
+        description: 'Optional Claude Code model for scout and packet stages. Defaults to rlm_model for OpenRouter and sonnet for direct Anthropic.'
+        required: false
+        type: string
+        default: ''
       claude_model:
-        description: 'Claude model to use. OpenRouter provider/model ID (e.g. anthropic/claude-sonnet-4.6).'
+        description: 'Optional Claude Code writer model. Defaults to anthropic/claude-opus-4.6 for OpenRouter and opus for direct Anthropic.'
         required: false
         type: string
         default: 'anthropic/claude-opus-4.6'
@@ -47,10 +57,11 @@ on:
         default: 12
     secrets:
       ANTHROPIC_API_KEY:
-        description: 'Deprecated: direct Anthropic billing. Retained optional for rollback only; not used while routing through OpenRouter.'
+        description: 'Direct Anthropic API key. Required when claude_provider=anthropic.'
         required: false
       OPENROUTER_API_KEY:
-        required: true
+        description: 'Required for RLM analysis and when claude_provider=openrouter.'
+        required: false
       workflow_PAT:
         description: 'Personal access token for PR creation (needed for reusable workflows)'
         required: false
@@ -195,6 +206,10 @@ jobs:
           import { readdir, readFile, writeFile } from 'node:fs/promises';
 
           async function analyzeCodebase() {
+            if (!process.env.OPENROUTER_API_KEY) {
+              throw new Error('OPENROUTER_API_KEY is required for RLM analysis; @cloudwarriors-ai/rlm currently requires OpenRouter even when Claude Code stages use direct Anthropic.');
+            }
+
             // Gather all source files
             const files = await readdir('.', { recursive: true });
             const sourceFiles = files.filter(f =>
@@ -589,20 +604,64 @@ jobs:
 
       - name: Run scout
         env:
-          ANTHROPIC_API_KEY: ""
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          CLAUDE_PROVIDER: ${{ inputs.claude_provider }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DIRECT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SCOUT_ROLE: ${{ matrix.role }}
           SCOUT_SCOPE: ${{ matrix.scope }}
           SCOUT_TURNS: ${{ inputs.scout_turns }}
-          SCOUT_MODEL: ${{ inputs.rlm_model }}
+          SCOUT_MODEL_INPUT: ${{ inputs.scout_model }}
+          SCOUT_MODEL_OPENROUTER_DEFAULT: ${{ inputs.rlm_model }}
+          SCOUT_MODEL_ANTHROPIC_DEFAULT: sonnet
           SCOUT_TOOLS: Read,Grep,Glob
         run: |
           set -euo pipefail
-          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
-            echo "::error::OPENROUTER_API_KEY is not set"
-            exit 1
-          fi
+          resolve_claude_model() {
+            local requested="$1"
+            local openrouter_default="$2"
+            local anthropic_default="$3"
+
+            case "$CLAUDE_PROVIDER" in
+              openrouter)
+                if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                  echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY=""
+                export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
+                export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
+                requested="${requested:-$openrouter_default}"
+                case "$requested" in
+                  */*) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                  *) echo "::error::OpenRouter Claude model must be provider/model (got '$requested')"; exit 1 ;;
+                esac
+                ;;
+              anthropic)
+                if [ -z "${DIRECT_ANTHROPIC_API_KEY:-}" ]; then
+                  echo "::error::ANTHROPIC_API_KEY is required when claude_provider=anthropic"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY="$DIRECT_ANTHROPIC_API_KEY"
+                unset ANTHROPIC_AUTH_TOKEN
+                unset ANTHROPIC_BASE_URL
+                if [ -z "$requested" ] || [ "$requested" = "$openrouter_default" ]; then
+                  requested="$anthropic_default"
+                fi
+                case "$requested" in
+                  */*) echo "::error::Direct Anthropic Claude model must not be an OpenRouter provider/model ID (got '$requested')"; exit 1 ;;
+                  *) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                esac
+                ;;
+              *)
+                echo "::error::claude_provider must be openrouter or anthropic (got '$CLAUDE_PROVIDER')"
+                exit 1
+                ;;
+            esac
+          }
+
+          RESOLVED_CLAUDE_MODEL=""
+          resolve_claude_model "$SCOUT_MODEL_INPUT" "$SCOUT_MODEL_OPENROUTER_DEFAULT" "$SCOUT_MODEL_ANTHROPIC_DEFAULT"
+          SCOUT_MODEL="$RESOLVED_CLAUDE_MODEL"
 
           cat > /tmp/scout-prompt.md <<EOF
           You are a bounded read-only scout in an automated GitHub issue fix pipeline.
@@ -719,18 +778,62 @@ jobs:
 
       - name: Build fix packet
         env:
-          ANTHROPIC_API_KEY: ""
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          CLAUDE_PROVIDER: ${{ inputs.claude_provider }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DIRECT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PACKET_TURNS: ${{ inputs.packet_turns }}
-          PACKET_MODEL: ${{ inputs.rlm_model }}
+          PACKET_MODEL_INPUT: ${{ inputs.scout_model }}
+          PACKET_MODEL_OPENROUTER_DEFAULT: ${{ inputs.rlm_model }}
+          PACKET_MODEL_ANTHROPIC_DEFAULT: sonnet
           PACKET_TOOLS: ""
         run: |
           set -euo pipefail
-          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
-            echo "::error::OPENROUTER_API_KEY is not set"
-            exit 1
-          fi
+          resolve_claude_model() {
+            local requested="$1"
+            local openrouter_default="$2"
+            local anthropic_default="$3"
+
+            case "$CLAUDE_PROVIDER" in
+              openrouter)
+                if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                  echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY=""
+                export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
+                export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
+                requested="${requested:-$openrouter_default}"
+                case "$requested" in
+                  */*) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                  *) echo "::error::OpenRouter Claude model must be provider/model (got '$requested')"; exit 1 ;;
+                esac
+                ;;
+              anthropic)
+                if [ -z "${DIRECT_ANTHROPIC_API_KEY:-}" ]; then
+                  echo "::error::ANTHROPIC_API_KEY is required when claude_provider=anthropic"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY="$DIRECT_ANTHROPIC_API_KEY"
+                unset ANTHROPIC_AUTH_TOKEN
+                unset ANTHROPIC_BASE_URL
+                if [ -z "$requested" ] || [ "$requested" = "$openrouter_default" ]; then
+                  requested="$anthropic_default"
+                fi
+                case "$requested" in
+                  */*) echo "::error::Direct Anthropic Claude model must not be an OpenRouter provider/model ID (got '$requested')"; exit 1 ;;
+                  *) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                esac
+                ;;
+              *)
+                echo "::error::claude_provider must be openrouter or anthropic (got '$CLAUDE_PROVIDER')"
+                exit 1
+                ;;
+            esac
+          }
+
+          RESOLVED_CLAUDE_MODEL=""
+          resolve_claude_model "$PACKET_MODEL_INPUT" "$PACKET_MODEL_OPENROUTER_DEFAULT" "$PACKET_MODEL_ANTHROPIC_DEFAULT"
+          PACKET_MODEL="$RESOLVED_CLAUDE_MODEL"
 
           total_scouts=0
           usable_scouts=0
@@ -1180,23 +1283,60 @@ jobs:
       - name: Run Claude with bypassPermissions
         id: fix
         run: |
-          # Fail closed if OpenRouter routing is not configured — never silently
-          # fall back to direct Anthropic billing.
-          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
-            echo "::error::OPENROUTER_API_KEY is not set; refusing to run autofix without OpenRouter routing"
-            exit 1
-          fi
-          case "${{ inputs.claude_model }}" in
-            */*) : ;;
-            *) echo "::error::claude_model must be an OpenRouter provider/model ID (got '${{ inputs.claude_model }}')"; exit 1 ;;
-          esac
+          resolve_claude_model() {
+            local requested="$1"
+            local openrouter_default="$2"
+            local anthropic_default="$3"
+
+            case "$CLAUDE_PROVIDER" in
+              openrouter)
+                if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+                  echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY=""
+                export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
+                export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
+                requested="${requested:-$openrouter_default}"
+                case "$requested" in
+                  */*) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                  *) echo "::error::OpenRouter Claude model must be provider/model (got '$requested')"; exit 1 ;;
+                esac
+                ;;
+              anthropic)
+                if [ -z "${DIRECT_ANTHROPIC_API_KEY:-}" ]; then
+                  echo "::error::ANTHROPIC_API_KEY is required when claude_provider=anthropic"
+                  exit 1
+                fi
+                export ANTHROPIC_API_KEY="$DIRECT_ANTHROPIC_API_KEY"
+                unset ANTHROPIC_AUTH_TOKEN
+                unset ANTHROPIC_BASE_URL
+                if [ -z "$requested" ] || [ "$requested" = "$openrouter_default" ]; then
+                  requested="$anthropic_default"
+                fi
+                case "$requested" in
+                  */*) echo "::error::Direct Anthropic Claude model must not be an OpenRouter provider/model ID (got '$requested')"; exit 1 ;;
+                  *) RESOLVED_CLAUDE_MODEL="$requested" ;;
+                esac
+                ;;
+              *)
+                echo "::error::claude_provider must be openrouter or anthropic (got '$CLAUDE_PROVIDER')"
+                exit 1
+                ;;
+            esac
+          }
+
+          RESOLVED_CLAUDE_MODEL=""
+          resolve_claude_model "$CLAUDE_MODEL_INPUT" "$CLAUDE_MODEL_OPENROUTER_DEFAULT" "$CLAUDE_MODEL_ANTHROPIC_DEFAULT"
+          CLAUDE_MODEL="$RESOLVED_CLAUDE_MODEL"
+
           set +e
           timeout 20m claude --print \
             --permission-mode bypassPermissions \
             --tools "$WRITER_TOOLS" \
             --allowedTools "$WRITER_TOOLS" \
             --max-turns ${{ inputs.max_claude_turns }} \
-            --model ${{ inputs.claude_model }} \
+            --model "$CLAUDE_MODEL" \
             --append-system-prompt "You are in patch-first mode, but a max-turn partial result is rejected by the pipeline. Decide quickly whether the issue is already fixed on the base branch; otherwise produce one focused, validated diff and stop." \
             < /tmp/fix-prompt.md 2>&1 | tee /tmp/claude-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
@@ -1329,12 +1469,12 @@ jobs:
             echo "::warning::Claude exited with $EXIT_CODE after producing a diff; preserving branch for review"
           fi
         env:
-          # Route Claude CLI through OpenRouter (matches reusable-claude-runner /
-          # reusable-claude-issue-handler). ANTHROPIC_API_KEY blanked so the CLI
-          # uses the auth token + base URL below instead of direct Anthropic billing.
-          ANTHROPIC_API_KEY: ""
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          CLAUDE_PROVIDER: ${{ inputs.claude_provider }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          DIRECT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL_INPUT: ${{ inputs.claude_model }}
+          CLAUDE_MODEL_OPENROUTER_DEFAULT: anthropic/claude-opus-4.6
+          CLAUDE_MODEL_ANTHROPIC_DEFAULT: opus
           WRITER_TOOLS: Read,Grep,Glob,Edit,MultiEdit,Write,Bash
 
       - name: Quality gate regression coverage
