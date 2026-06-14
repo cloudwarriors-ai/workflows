@@ -596,6 +596,7 @@ jobs:
           SCOUT_SCOPE: ${{ matrix.scope }}
           SCOUT_TURNS: ${{ inputs.scout_turns }}
           SCOUT_MODEL: ${{ inputs.rlm_model }}
+          SCOUT_TOOLS: Read,Grep,Glob
         run: |
           set -euo pipefail
           if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
@@ -616,8 +617,10 @@ jobs:
 
           Rules:
           - Do not edit files.
+          - Tool policy: only Read, Grep, and Glob are available. Do not ask for
+            Bash, Edit, Write, Agent/Task, WebFetch, WebSearch, or TodoWrite.
           - Start from repo-context.md. If it has enough evidence, do not search.
-          - Prefer rg and targeted reads over broad exploration.
+          - Prefer Grep, Glob, and targeted Read calls over broad exploration.
           - Spend at most 4 targeted searches/reads before writing conclusions.
           - If you cannot identify the exact files quickly, output low confidence
             findings instead of continuing exploration.
@@ -633,6 +636,8 @@ jobs:
           set +e
           timeout 8m claude --print \
             --permission-mode bypassPermissions \
+            --tools "$SCOUT_TOOLS" \
+            --allowedTools "$SCOUT_TOOLS" \
             --max-turns "$SCOUT_TURNS" \
             --model "$SCOUT_MODEL" \
             < /tmp/scout-prompt.md 2>&1 | tee "scout-${SCOUT_ROLE}.md"
@@ -643,6 +648,7 @@ jobs:
             echo "role=${SCOUT_ROLE}"
             echo "model=${SCOUT_MODEL}"
             echo "turns=${SCOUT_TURNS}"
+            echo "tools=${SCOUT_TOOLS}"
             echo "exit_code=${status}"
             report_bytes=$(wc -c < "scout-${SCOUT_ROLE}.md" | tr -d ' ')
             echo "report_bytes=${report_bytes}"
@@ -718,6 +724,7 @@ jobs:
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
           PACKET_TURNS: ${{ inputs.packet_turns }}
           PACKET_MODEL: ${{ inputs.rlm_model }}
+          PACKET_TOOLS: ""
         run: |
           set -euo pipefail
           if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
@@ -757,6 +764,7 @@ jobs:
             {
               echo "model=${PACKET_MODEL}"
               echo "turns=${PACKET_TURNS}"
+              echo "tools=none"
               echo "exit_code=0"
               echo "total_scouts=${total_scouts}"
               echo "usable_scouts=${usable_scouts}"
@@ -782,7 +790,9 @@ jobs:
           - repo-context.md and repo-context-meta.txt
           - scout-*.md and scout-*-meta.txt
 
-          Do not inspect a repository. Use only these artifacts.
+          Tool policy: no Claude Code tools are available in this step.
+          Do not inspect a repository. Use only the artifacts already included
+          in this prompt.
           If scout reports are max-turn errors, rely on repo-context.md.
           Produce a compact Markdown packet for the fixer with:
           - issue_summary
@@ -818,6 +828,7 @@ jobs:
           set +e
           timeout 8m claude --print \
             --permission-mode bypassPermissions \
+            --tools "$PACKET_TOOLS" \
             --max-turns "$PACKET_TURNS" \
             --model "$PACKET_MODEL" \
             < /tmp/packet-full-prompt.md 2>&1 | tee fix-packet.md
@@ -931,6 +942,7 @@ jobs:
           {
             echo "model=${PACKET_MODEL}"
             echo "turns=${PACKET_TURNS}"
+            echo "tools=none"
             echo "exit_code=${status}"
             echo "total_scouts=${total_scouts}"
             echo "usable_scouts=${usable_scouts}"
@@ -1077,7 +1089,12 @@ jobs:
           - Start from fix-packet.md. Read only the packet, issue-context.md,
             rlm-analysis.json, repo-context.md, and the specific files/globs
             named by the packet.
-          - Use rg and targeted reads only when needed to resolve a concrete blocker.
+          - Tool policy: only Read, Grep, Glob, Edit, MultiEdit, Write, and
+            Bash are available. Web, Agent/Task, notebook, and Todo tools are
+            not available. Use Bash only for repository search, git status/diff,
+            and validation commands.
+          - Use Grep/Glob/Read first; use Bash search only when needed to
+            resolve a concrete blocker.
           - Before editing, compare the issue's expected behavior against the
             current base branch code and existing regression tests. Prefer an
             existing validated solution over inventing a second implementation.
@@ -1176,6 +1193,8 @@ jobs:
           set +e
           timeout 20m claude --print \
             --permission-mode bypassPermissions \
+            --tools "$WRITER_TOOLS" \
+            --allowedTools "$WRITER_TOOLS" \
             --max-turns ${{ inputs.max_claude_turns }} \
             --model ${{ inputs.claude_model }} \
             --append-system-prompt "You are in patch-first mode, but a max-turn partial result is rejected by the pipeline. Decide quickly whether the issue is already fixed on the base branch; otherwise produce one focused, validated diff and stop." \
@@ -1316,6 +1335,7 @@ jobs:
           ANTHROPIC_API_KEY: ""
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          WRITER_TOOLS: Read,Grep,Glob,Edit,MultiEdit,Write,Bash
 
       - name: Quality gate regression coverage
         if: steps.fix.outputs.has_changes == 'true'
