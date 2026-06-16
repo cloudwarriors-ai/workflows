@@ -338,16 +338,47 @@ jobs:
               error: result.success ? '' : String(result.error || 'unknown RLM error')
             };
 
-            if (!result.success) {
-              throw new Error(`RLM analysis failed after repair attempt: ${metadata.error}`);
-            }
+            // Degrade-and-continue: a flaky RLM result (failed, or success-but-not-a-
+            // JSON-object) must not kill the loop. Fall back to deterministic, low-
+            // confidence context so downstream scouts/writer still run. Restores the
+            // pre-#18 behavior (commit 50658f3, "continue with fallback RLM analysis");
+            // #18/944023b had changed this to fail closed and that blocks every run
+            // whenever the RLM model returns a non-object.
+            const rawAnswer = result.success ? result.answer : null;
+            const answerIsObject =
+              rawAnswer && typeof rawAnswer === 'object' && !Array.isArray(rawAnswer);
 
-            const analysis = result.answer;
-            if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) {
-              throw new Error('RLM analysis did not return a JSON object');
+            let analysis;
+            if (answerIsObject) {
+              analysis = rawAnswer;
+              console.log(`RLM analysis complete. Cost: $${metadata.costUsd.toFixed(4)} repaired=${repaired}`);
+            } else {
+              metadata.fallback = true;
+              if (!metadata.error) {
+                metadata.error = 'RLM analysis did not return a JSON object';
+              }
+              analysis = {
+                architecture: {
+                  layers: ['deterministic fallback: RLM model analysis failed'],
+                  modules: Array.from(new Set(sourceFiles.map((file) => file.split('/')[0]))).slice(0, 20),
+                  mainPatterns: []
+                },
+                components: [],
+                conventions: {
+                  naming: 'fallback unavailable',
+                  errorHandling: 'fallback unavailable',
+                  testing: 'use repo-context.md and scout reports for targeted validation',
+                  logging: 'fallback unavailable'
+                },
+                qualityHotspots: [],
+                securityPatterns: [],
+                recommendations: [
+                  'RLM analysis failed; downstream scouts must rely on issue context and deterministic repo search.',
+                  'Treat this fallback as low-confidence context, not proof.'
+                ]
+              };
+              console.error(`RLM analysis unusable; writing deterministic fallback artifact: ${metadata.error}`);
             }
-
-            console.log(`RLM analysis complete. Cost: $${metadata.costUsd.toFixed(4)} repaired=${repaired}`);
 
             await writeFile(savedPath, JSON.stringify({
               analysis,
