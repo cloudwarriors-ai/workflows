@@ -1308,8 +1308,10 @@ jobs:
         id: branch
         run: |
           BRANCH_NAME="${{ inputs.head }}"
+          BASE_SHA="$(git rev-parse HEAD)"
           git checkout -b "$BRANCH_NAME"
           echo "branch=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude with bypassPermissions
         id: fix
@@ -1377,9 +1379,15 @@ jobs:
             MAX_TURNS_REACHED=true
           fi
 
-          # Restore any workflow files Claude might have touched
-          git checkout -- .github/ 2>/dev/null || true
-          git checkout -- .env* 2>/dev/null || true
+          # Restore forbidden files against the captured base, including changes
+          # the writer may have committed before returning control.
+          git restore --source="$BASE_SHA" --staged --worktree -- .github/ 2>/dev/null || true
+          git restore --source="$BASE_SHA" --staged --worktree -- .env* 2>/dev/null || true
+          while IFS= read -r forbidden; do
+            [ -z "$forbidden" ] && continue
+            git rm -f --ignore-unmatch "$forbidden" >/dev/null 2>&1 || true
+            rm -f -- "$forbidden"
+          done < <(git ls-files --others --exclude-standard -- .github/ '.env*' 2>/dev/null || true)
 
           # Agent context/scout/packet files are diagnostic inputs, not product
           # changes. Preserve a copy for artifact upload, then remove them before
@@ -1422,12 +1430,17 @@ jobs:
           fi
 
           MANIFEST_CHANGES=$(
-            git status --porcelain -- package.json ':(glob)**/package.json' 2>/dev/null || true
+            {
+              git diff --name-only "$BASE_SHA" -- \
+                package.json ':(glob)**/package.json' 2>/dev/null || true
+              git ls-files --others --exclude-standard -- \
+                package.json ':(glob)**/package.json' 2>/dev/null || true
+            } | sort -u
           )
           if [ -z "$MANIFEST_CHANGES" ]; then
             LOCKFILE_CHANGES=$(
               {
-                git diff --name-only -- \
+                git diff --name-only "$BASE_SHA" -- \
                   package-lock.json ':(glob)**/package-lock.json' \
                   npm-shrinkwrap.json ':(glob)**/npm-shrinkwrap.json' \
                   pnpm-lock.yaml ':(glob)**/pnpm-lock.yaml' \
@@ -1444,14 +1457,20 @@ jobs:
             if [ -n "$LOCKFILE_CHANGES" ]; then
               while IFS= read -r lockfile; do
                 [ -z "$lockfile" ] && continue
-                git checkout -- "$lockfile" 2>/dev/null || rm -f "$lockfile"
+                git restore --source="$BASE_SHA" --staged --worktree -- "$lockfile" 2>/dev/null || {
+                  git rm -f --ignore-unmatch "$lockfile" >/dev/null 2>&1 || true
+                  rm -f -- "$lockfile"
+                }
               done <<< "$LOCKFILE_CHANGES"
             fi
           fi
 
-          # Check for changes
+          # Compare the complete branch/worktree state to the captured base. The
+          # writer is allowed Bash and may commit before returning, so
+          # `git status` alone is insufficient and caused valid fixes to be lost.
           HAS_CHANGES=false
-          if [ -n "$(git status --porcelain)" ]; then
+          if ! git diff --quiet "$BASE_SHA" -- ||
+            [ -n "$(git ls-files --others --exclude-standard)" ]; then
             HAS_CHANGES=true
           fi
 
@@ -1500,6 +1519,7 @@ jobs:
             echo "::warning::Claude exited with $EXIT_CODE after producing a diff; preserving branch for review"
           fi
         env:
+          BASE_SHA: ${{ steps.branch.outputs.base_sha }}
           CLAUDE_PROVIDER: ${{ inputs.claude_provider }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DIRECT_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -1529,7 +1549,10 @@ jobs:
             labels.some((label) => label === 'bug' || label === 'track: bug' || label.includes('bug')) ||
             /\bbug\b|\[bug\]/i.test(title);
 
-          const tracked = cp.execSync('git diff --name-only --diff-filter=ACMRTUXB HEAD', { encoding: 'utf8' });
+          const tracked = cp.execSync(
+            `git diff --name-only --diff-filter=ACMRTUXB ${process.env.BASE_SHA} --`,
+            { encoding: 'utf8' }
+          );
           const untracked = cp.execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' });
           const changedFiles = Array.from(new Set(
             `${tracked}\n${untracked}`
@@ -1575,6 +1598,8 @@ jobs:
             process.exit(1);
           }
           NODE
+        env:
+          BASE_SHA: ${{ steps.branch.outputs.base_sha }}
 
       - name: Prepare autofix diagnostics
         if: always()
@@ -1612,15 +1637,23 @@ jobs:
           git config user.email "claude-bot@anthropic.com"
 
           git add -A
-          {
-            printf 'fix: resolve issue #%s\n\n' "${{ inputs.issue_number }}"
-            printf '%s\n\n' "$ISSUE_TITLE"
-            printf 'Co-Authored-By: Claude Code <claude-bot@anthropic.com>\n'
-          } > /tmp/autofix-commit-message.txt
-          git commit -F /tmp/autofix-commit-message.txt
+          if ! git diff --cached --quiet; then
+            {
+              printf 'fix: resolve issue #%s\n\n' "${{ inputs.issue_number }}"
+              printf '%s\n\n' "$ISSUE_TITLE"
+              printf 'Co-Authored-By: Claude Code <claude-bot@anthropic.com>\n'
+            } > /tmp/autofix-commit-message.txt
+            git commit -F /tmp/autofix-commit-message.txt
+          fi
+
+          if git diff --quiet "$BASE_SHA" --; then
+            echo "::error::Autofix branch no longer differs from the captured base"
+            exit 1
+          fi
 
           git push -u origin "${{ steps.branch.outputs.branch }}" --force-with-lease
         env:
+          BASE_SHA: ${{ steps.branch.outputs.base_sha }}
           ISSUE_TITLE: ${{ steps.issue.outputs.title }}
 
       - name: Comment fix complete
