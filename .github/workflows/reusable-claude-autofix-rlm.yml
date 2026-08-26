@@ -25,6 +25,11 @@ on:
         required: false
         type: number
         default: 60
+      writer_timeout_minutes:
+        description: 'Wall-clock budget (minutes) for the Claude writer job. The default matches the historical hardcoded 30; large multi-surface issues need more.'
+        required: false
+        type: number
+        default: 30
       claude_provider:
         description: 'Provider for Claude Code scout/packet/writer stages: openrouter or anthropic. RLM analysis still requires OpenRouter.'
         required: false
@@ -1138,7 +1143,10 @@ jobs:
     name: Claude Adversarial Auto-Fix
     needs: [issue-context, rlm-analysis, repo-context, scout, packet-synthesis]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Wall clock was the binding constraint on multi-surface issues (scopely
+    # #1418/#1426: writer killed at the old hardcoded 30 while turns were
+    # plentiful) — so the budget is caller-sized now.
+    timeout-minutes: ${{ inputs.writer_timeout_minutes }}
     outputs:
       already_fixed: ${{ steps.fix.outputs.already_fixed }}
       already_fixed_reason: ${{ steps.fix.outputs.already_fixed_reason }}
