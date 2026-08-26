@@ -1369,17 +1369,48 @@ jobs:
           resolve_claude_model "$CLAUDE_MODEL_INPUT" "$CLAUDE_MODEL_OPENROUTER_DEFAULT" "$CLAUDE_MODEL_ANTHROPIC_DEFAULT"
           CLAUDE_MODEL="$RESOLVED_CLAUDE_MODEL"
 
+          # Remember where the branch was before the writer ran, so a writer that
+          # commits on its own (Bash is in its toolset) is detected below rather than
+          # read as "no product diff".
+          PRE_WRITER_HEAD=$(git rev-parse HEAD)
+          echo "$PRE_WRITER_HEAD" > /tmp/claude-pre-head.txt
+
+          # Keep the FULL transcript (every tool call and result) as stream-json for
+          # diagnostics. Previously only the final message survived, which made a
+          # "Done, fixed X, all tests pass" with an empty diff undiagnosable.
+          # /tmp/claude-output.txt keeps its old meaning (final text) for the greps below.
           set +e
           timeout 20m claude --print \
+            --output-format stream-json --verbose \
             --permission-mode bypassPermissions \
             --tools "$WRITER_TOOLS" \
             --allowedTools "$WRITER_TOOLS" \
             --max-turns ${{ inputs.max_claude_turns }} \
             --model "$CLAUDE_MODEL" \
             --append-system-prompt "You are in patch-first mode, but a max-turn partial result is rejected by the pipeline. Decide quickly whether the issue is already fixed on the base branch; otherwise produce one focused, validated diff and stop." \
-            < /tmp/fix-prompt.md 2>&1 | tee /tmp/claude-output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
+            < /tmp/fix-prompt.md > /tmp/claude-transcript.jsonl 2>/tmp/claude-stderr.txt
+          EXIT_CODE=$?
           set -e
+          {
+            jq -r 'select(.type=="result") | .result // empty' /tmp/claude-transcript.jsonl 2>/dev/null
+            # Preserve the sentinel the max-turn check below greps for.
+            if jq -e 'select(.type=="result") | .subtype=="error_max_turns"' /tmp/claude-transcript.jsonl >/dev/null 2>&1; then
+              echo "Reached max turns"
+            fi
+            cat /tmp/claude-stderr.txt
+          } > /tmp/claude-output.txt
+          cat /tmp/claude-output.txt
+          echo "writer transcript: $(wc -l < /tmp/claude-transcript.jsonl) events, $(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' /tmp/claude-transcript.jsonl 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
+
+          # A writer that committed its own work leaves a clean tree. Fold those
+          # commits back into the working tree so the has_changes check and the
+          # pipeline's own commit step see them.
+          POST_WRITER_HEAD=$(git rev-parse HEAD)
+          if [ "$POST_WRITER_HEAD" != "$PRE_WRITER_HEAD" ]; then
+            echo "::warning::writer created $(git rev-list --count "$PRE_WRITER_HEAD..$POST_WRITER_HEAD") commit(s) itself; folding them into the working tree"
+            git log --oneline "$PRE_WRITER_HEAD..$POST_WRITER_HEAD" | sed 's/^/  writer commit: /'
+            git reset --soft "$PRE_WRITER_HEAD"
+          fi
           MAX_TURNS_REACHED=false
           if grep -qi "Reached max turns" /tmp/claude-output.txt; then
             MAX_TURNS_REACHED=true
@@ -1578,9 +1609,50 @@ jobs:
           console.log(report);
 
           if (requiresRegression && productionFiles.length > 0 && testFiles.length === 0) {
-            console.error('::error::Bug fix changed production files without adding or updating a regression test.');
-            console.error('Add the narrowest test that would have failed before the fix, or stop for human review if the issue cannot be tested in CI.');
-            process.exit(1);
+            // No test file changed. Before failing, check whether EXISTING tests already
+            // prove the regression: run the repo's own test command (from
+            // .autopilot/config.json) on the base tree and on the fix. Base failing and
+            // the fix passing is regression coverage; anything else is not.
+            let testCommand = '';
+            try {
+              const cfg = JSON.parse(fs.readFileSync('.autopilot/config.json', 'utf8'));
+              testCommand = String(cfg.testCommand || '').trim();
+            } catch (_) { /* no config: fall through to the file-based verdict */ }
+
+            const runTests = (label) => {
+              try {
+                cp.execSync(`bash -eo pipefail -c ${JSON.stringify(testCommand)}`, {
+                  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15 * 60 * 1000,
+                });
+                console.log(`existing-coverage probe: tests PASS on ${label}`);
+                return true;
+              } catch (err) {
+                console.log(`existing-coverage probe: tests FAIL on ${label} (exit ${err.status})`);
+                return false;
+              }
+            };
+
+            let existingCoverage = false;
+            if (testCommand) {
+              cp.execSync('git stash push --include-untracked --quiet', { stdio: 'inherit' });
+              let basePasses = true;
+              try { basePasses = runTests('base'); }
+              finally { cp.execSync('git stash pop --quiet', { stdio: 'inherit' }); }
+              const fixPasses = runTests('fix');
+              existingCoverage = !basePasses && fixPasses;
+              fs.appendFileSync('/tmp/autofix-regression-gate.txt',
+                `\nexisting_coverage_probe: base_passes=${basePasses} fix_passes=${fixPasses} test_command=${JSON.stringify(testCommand)}\n`);
+            } else {
+              fs.appendFileSync('/tmp/autofix-regression-gate.txt', '\nexisting_coverage_probe: skipped (no .autopilot/config.json testCommand)\n');
+            }
+
+            if (existingCoverage) {
+              console.log('::notice::No test file changed, but the existing suite fails on base and passes with the fix — existing regression coverage accepted.');
+            } else {
+              console.error('::error::Bug fix changed production files without adding or updating a regression test.');
+              console.error('Add the narrowest test that would have failed before the fix, or stop for human review if the issue cannot be tested in CI.');
+              process.exit(1);
+            }
           }
           NODE
 
@@ -1603,6 +1675,9 @@ jobs:
           git status --porcelain > /tmp/autofix-diagnostics/git-status.txt 2>&1 || true
           git diff --stat > /tmp/autofix-diagnostics/git-diff-stat.txt 2>&1 || true
           git diff --binary > /tmp/autofix-diagnostics/git-diff.patch 2>&1 || true
+          git diff --cached --stat > /tmp/autofix-diagnostics/git-diff-cached-stat.txt 2>&1 || true
+          git log --oneline -5 > /tmp/autofix-diagnostics/git-log.txt 2>&1 || true
+          cp /tmp/claude-transcript.jsonl /tmp/claude-stderr.txt /tmp/claude-pre-head.txt /tmp/autofix-diagnostics/ 2>/dev/null || true
 
       - name: Upload autofix diagnostics
         if: always()
