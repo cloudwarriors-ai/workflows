@@ -1609,9 +1609,50 @@ jobs:
           console.log(report);
 
           if (requiresRegression && productionFiles.length > 0 && testFiles.length === 0) {
-            console.error('::error::Bug fix changed production files without adding or updating a regression test.');
-            console.error('Add the narrowest test that would have failed before the fix, or stop for human review if the issue cannot be tested in CI.');
-            process.exit(1);
+            // No test file changed. Before failing, check whether EXISTING tests already
+            // prove the regression: run the repo's own test command (from
+            // .autopilot/config.json) on the base tree and on the fix. Base failing and
+            // the fix passing is regression coverage; anything else is not.
+            let testCommand = '';
+            try {
+              const cfg = JSON.parse(fs.readFileSync('.autopilot/config.json', 'utf8'));
+              testCommand = String(cfg.testCommand || '').trim();
+            } catch (_) { /* no config: fall through to the file-based verdict */ }
+
+            const runTests = (label) => {
+              try {
+                cp.execSync(`bash -eo pipefail -c ${JSON.stringify(testCommand)}`, {
+                  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15 * 60 * 1000,
+                });
+                console.log(`existing-coverage probe: tests PASS on ${label}`);
+                return true;
+              } catch (err) {
+                console.log(`existing-coverage probe: tests FAIL on ${label} (exit ${err.status})`);
+                return false;
+              }
+            };
+
+            let existingCoverage = false;
+            if (testCommand) {
+              cp.execSync('git stash push --include-untracked --quiet', { stdio: 'inherit' });
+              let basePasses = true;
+              try { basePasses = runTests('base'); }
+              finally { cp.execSync('git stash pop --quiet', { stdio: 'inherit' }); }
+              const fixPasses = runTests('fix');
+              existingCoverage = !basePasses && fixPasses;
+              fs.appendFileSync('/tmp/autofix-regression-gate.txt',
+                `\nexisting_coverage_probe: base_passes=${basePasses} fix_passes=${fixPasses} test_command=${JSON.stringify(testCommand)}\n`);
+            } else {
+              fs.appendFileSync('/tmp/autofix-regression-gate.txt', '\nexisting_coverage_probe: skipped (no .autopilot/config.json testCommand)\n');
+            }
+
+            if (existingCoverage) {
+              console.log('::notice::No test file changed, but the existing suite fails on base and passes with the fix — existing regression coverage accepted.');
+            } else {
+              console.error('::error::Bug fix changed production files without adding or updating a regression test.');
+              console.error('Add the narrowest test that would have failed before the fix, or stop for human review if the issue cannot be tested in CI.');
+              process.exit(1);
+            }
           }
           NODE
 
