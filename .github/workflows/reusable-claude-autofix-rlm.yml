@@ -155,6 +155,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       analysis_path: ${{ steps.run-rlm.outputs.analysis_path }}
+      # True only once THIS run added `claude-working`; the release-lock backstop keys on it
+      # so a run refused by an existing lock never removes another run's lock.
+      lock_acquired: ${{ steps.lock.outcome == 'success' }}
 
     steps:
       - name: Checkout code
@@ -180,6 +183,7 @@ jobs:
             }
 
       - name: Add lock label
+        id: lock
         uses: actions/github-script@v7
         with:
           script: |
@@ -1752,6 +1756,8 @@ jobs:
               ].join('\n'),
             });
 
+      # Fast path only: this step cannot run when the job never starts (a cancel or failure
+      # in rlm-analysis/scout/packet-synthesis). `release-lock` below is the backstop.
       - name: Remove lock label
         if: always()
         uses: actions/github-script@v7
@@ -1786,3 +1792,31 @@ jobs:
               issue_number: ${{ inputs.issue_number }},
               labels: ['needs-human-review', 'auto-fix-failed']
             });
+
+  # Backstop for the lock: runs on every outcome including cancellation (job-level always()),
+  # after every job that could have been cancelled mid-flight. Without it a run cancelled before
+  # claude-autofix started left `claude-working` on the issue and every later run refused to
+  # start (observed live on the cube dogfood repo).
+  release-lock:
+    needs: [rlm-analysis, repo-context, scout, packet-synthesis, claude-autofix]
+    if: always() && needs.rlm-analysis.outputs.lock_acquired == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Remove lock label (backstop)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }},
+                name: 'claude-working'
+              });
+              console.log('Lock label removed by backstop');
+            } catch (error) {
+              console.log('Lock label already removed or does not exist');
+            }
