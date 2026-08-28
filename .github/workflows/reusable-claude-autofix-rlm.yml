@@ -165,6 +165,7 @@ jobs:
         with:
           ref: ${{ inputs.base }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check for lock label
         id: check-lock
@@ -457,6 +458,7 @@ jobs:
         with:
           ref: ${{ inputs.base }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download issue context
         uses: actions/download-artifact@v4
@@ -618,6 +620,7 @@ jobs:
         with:
           ref: ${{ inputs.base }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download issue context
         uses: actions/download-artifact@v4
@@ -1165,6 +1168,7 @@ jobs:
         with:
           ref: ${{ inputs.base }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download issue context
         uses: actions/download-artifact@v4
@@ -1694,6 +1698,9 @@ jobs:
 
       - name: Commit and push changes
         if: steps.fix.outputs.has_changes == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
         run: |
           git config user.name "Claude Code Bot"
           git config user.email "claude-bot@anthropic.com"
@@ -1706,9 +1713,9 @@ jobs:
           } > /tmp/autofix-commit-message.txt
           git commit -F /tmp/autofix-commit-message.txt
 
-          git push -u origin "${{ steps.branch.outputs.branch }}" --force-with-lease
-        env:
-          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          git push -u \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:${{ steps.branch.outputs.branch }}" --force-with-lease
 
       - name: Comment fix complete
         if: steps.fix.outputs.has_changes == 'true'
