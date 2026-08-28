@@ -1157,9 +1157,12 @@ jobs:
     outputs:
       already_fixed: ${{ steps.fix.outputs.already_fixed }}
       already_fixed_reason: ${{ steps.fix.outputs.already_fixed_reason }}
+      has_changes: ${{ steps.fix.outputs.has_changes }}
+      max_turns_reached: ${{ steps.fix.outputs.max_turns_reached }}
+      claude_exit_code: ${{ steps.fix.outputs.claude_exit_code }}
+      base_sha: ${{ steps.base.outputs.sha }}
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
       issues: write
 
     steps:
@@ -1169,6 +1172,10 @@ jobs:
           ref: ${{ inputs.base }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Capture trusted base revision
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Download issue context
         uses: actions/download-artifact@v4
@@ -1696,44 +1703,34 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Commit and push changes
+      # The writer has Bash and bypassPermissions, so this job must never receive a
+      # repository-write credential. Export only the reviewed tree delta; a fresh
+      # publisher job below applies it without executing feature-controlled code.
+      - name: Prepare autofix patch
         if: steps.fix.outputs.has_changes == 'true'
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
-          git config user.name "Claude Code Bot"
-          git config user.email "claude-bot@anthropic.com"
-
+          set -euo pipefail
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Writer base SHA is not a full commit SHA"
+            exit 1
+          fi
           git add -A
-          {
-            printf 'fix: resolve issue #%s\n\n' "${{ inputs.issue_number }}"
-            printf '%s\n\n' "$ISSUE_TITLE"
-            printf 'Co-Authored-By: Claude Code <claude-bot@anthropic.com>\n'
-          } > /tmp/autofix-commit-message.txt
-          git commit -F /tmp/autofix-commit-message.txt
+          git diff --cached --binary --full-index "$BASE_SHA" > /tmp/autofix.patch
+          if [ ! -s /tmp/autofix.patch ]; then
+            echo "::error::Writer reported changes but produced an empty patch"
+            exit 1
+          fi
 
-          git push -u \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:${{ steps.branch.outputs.branch }}" --force-with-lease
-
-      - name: Comment fix complete
+      - name: Upload autofix patch
         if: steps.fix.outputs.has_changes == 'true'
-        uses: actions/github-script@v7
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const partial = '${{ steps.fix.outputs.max_turns_reached }}' === 'true' ||
-              '${{ steps.fix.outputs.claude_exit_code }}' !== '0';
-            const body = partial
-              ? `⚠️ Auto-fix produced a reviewable partial branch after hitting a tool/turn limit. Changes pushed to \`${{ steps.branch.outputs.branch }}\` targeting \`${{ inputs.base }}\`. PR will be created by the pipeline for human validation.`
-              : `✅ Auto-fix complete! Changes pushed to \`${{ steps.branch.outputs.branch }}\` targeting \`${{ inputs.base }}\`. PR will be created by the pipeline.`;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ inputs.issue_number }},
-              body
-            });
+          name: autofix-patch-${{ inputs.issue_number }}
+          path: /tmp/autofix.patch
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Comment already fixed
         if: steps.fix.outputs.already_fixed == 'true'
@@ -1763,24 +1760,6 @@ jobs:
               ].join('\n'),
             });
 
-      # Fast path only: this step cannot run when the job never starts (a cancel or failure
-      # in rlm-analysis/scout/packet-synthesis). `release-lock` below is the backstop.
-      - name: Remove lock label
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: ${{ inputs.issue_number }},
-                name: 'claude-working'
-              });
-            } catch (error) {
-              console.log('Lock label already removed or does not exist');
-            }
-
       - name: Comment on failure
         if: failure()
         uses: actions/github-script@v7
@@ -1800,12 +1779,136 @@ jobs:
               labels: ['needs-human-review', 'auto-fix-failed']
             });
 
+  # The only repository-write credential in the writer path lives in this fresh
+  # job. It never runs the writer, repository scripts, hooks, or feature commands.
+  publish-autofix:
+    name: Publish Auto-Fix
+    needs: [issue-context, claude-autofix]
+    if: needs.claude-autofix.result == 'success' && needs.claude-autofix.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download autofix patch
+        uses: actions/download-artifact@v4
+        with:
+          name: autofix-patch-${{ inputs.issue_number }}
+          path: /tmp/autofix-publish
+
+      - name: Apply and commit patch without repository hooks
+        id: commit
+        env:
+          ISSUE_TITLE: ${{ needs.issue-context.outputs.issue_title }}
+          EXPECTED_BASE_SHA: ${{ needs.claude-autofix.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="${{ inputs.head }}"
+          ACTUAL_BASE_SHA=$(git rev-parse HEAD)
+          if ! [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             [ "$ACTUAL_BASE_SHA" != "$EXPECTED_BASE_SHA" ]; then
+            echo "::error::Base branch changed after the writer ran; refusing to publish an unverified patch"
+            exit 1
+          fi
+          if ! git check-ref-format "refs/heads/${BRANCH_NAME}"; then
+            echo "::error::Invalid autofix branch name"
+            exit 1
+          fi
+          if [ ! -s /tmp/autofix-publish/autofix.patch ]; then
+            echo "::error::Autofix patch artifact is missing or empty"
+            exit 1
+          fi
+
+          git apply --index --binary /tmp/autofix-publish/autofix.patch
+          if git diff --cached --quiet; then
+            echo "::error::Autofix patch produced no staged changes on the trusted base"
+            exit 1
+          fi
+
+          git config user.name "Claude Code Bot"
+          git config user.email "claude-bot@anthropic.com"
+          {
+            printf 'fix: resolve issue #%s\n\n' "${{ inputs.issue_number }}"
+            printf '%s\n\n' "$ISSUE_TITLE"
+            printf 'Co-Authored-By: Claude Code <claude-bot@anthropic.com>\n'
+          } > /tmp/autofix-publish/commit-message.txt
+          git -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+            commit -F /tmp/autofix-publish/commit-message.txt
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Push committed patch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="${{ inputs.head }}"
+          if ! [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+             ! git check-ref-format "refs/heads/${BRANCH_NAME}"; then
+            echo "::error::Refusing to push an invalid commit or branch"
+            exit 1
+          fi
+
+          REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          REMOTE_SHA=$(git -c credential.helper= ls-remote "$REMOTE_URL" "refs/heads/${BRANCH_NAME}" | awk 'NR == 1 { print $1 }')
+          if [ -n "$REMOTE_SHA" ] && ! [[ "$REMOTE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Remote branch returned an invalid commit SHA"
+            exit 1
+          fi
+
+          git -c core.hooksPath=/dev/null -c credential.helper= push "$REMOTE_URL" \
+            "${COMMIT_SHA}:refs/heads/${BRANCH_NAME}" \
+            "--force-with-lease=refs/heads/${BRANCH_NAME}:${REMOTE_SHA}"
+
+      - name: Comment fix complete
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const partial = '${{ needs.claude-autofix.outputs.max_turns_reached }}' === 'true' ||
+              '${{ needs.claude-autofix.outputs.claude_exit_code }}' !== '0';
+            const body = partial
+              ? `⚠️ Auto-fix produced a reviewable partial branch after hitting a tool/turn limit. Changes pushed to \`${{ inputs.head }}\` targeting \`${{ inputs.base }}\`. PR will be created by the pipeline for human validation.`
+              : `✅ Auto-fix complete! Changes pushed to \`${{ inputs.head }}\` targeting \`${{ inputs.base }}\`. PR will be created by the pipeline.`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body
+            });
+
+      - name: Comment on publish failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: `❌ Auto-fix patch publishing failed. Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['needs-human-review', 'auto-fix-failed']
+            });
+
   # Backstop for the lock: runs on every outcome including cancellation (job-level always()),
   # after every job that could have been cancelled mid-flight. Without it a run cancelled before
   # claude-autofix started left `claude-working` on the issue and every later run refused to
   # start (observed live on the cube dogfood repo).
   release-lock:
-    needs: [rlm-analysis, repo-context, scout, packet-synthesis, claude-autofix]
+    needs: [rlm-analysis, repo-context, scout, packet-synthesis, claude-autofix, publish-autofix]
     if: always() && needs.rlm-analysis.outputs.lock_acquired == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
