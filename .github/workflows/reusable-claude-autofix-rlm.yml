@@ -195,6 +195,27 @@ jobs:
               labels: ['claude-working']
             });
 
+      - name: Validate OpenRouter credential
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+            echo "::error::OPENROUTER_API_KEY is required for RLM analysis"
+            exit 1
+          fi
+
+          status=$(curl --silent --show-error \
+            --connect-timeout 10 \
+            --max-time 20 \
+            --output /dev/null \
+            --write-out '%{http_code}' \
+            https://openrouter.ai/api/v1/key \
+            -H "Authorization: Bearer ${OPENROUTER_API_KEY}" || true)
+          if [ "$status" != "200" ]; then
+            echo "::error::OPENROUTER_API_KEY was rejected by OpenRouter (HTTP ${status:-000})"
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -643,7 +664,7 @@ jobs:
           node-version: '22'
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.250
 
       - name: Run scout
         env:
@@ -670,10 +691,9 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                # An empty API-key variable still wins credential precedence and
-                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
-                # OpenRouter bearer-token path.
-                unset ANTHROPIC_API_KEY
+                # OpenRouter's Claude Code contract requires the API-key variable
+                # to be present but empty so the bearer token owns authentication.
+                export ANTHROPIC_API_KEY=""
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
@@ -820,7 +840,7 @@ jobs:
           node-version: '22'
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.250
 
       - name: Build fix packet
         env:
@@ -845,10 +865,9 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                # An empty API-key variable still wins credential precedence and
-                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
-                # OpenRouter bearer-token path.
-                unset ANTHROPIC_API_KEY
+                # OpenRouter's Claude Code contract requires the API-key variable
+                # to be present but empty so the bearer token owns authentication.
+                export ANTHROPIC_API_KEY=""
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
@@ -1224,7 +1243,7 @@ jobs:
           node-version: '22'
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.250
 
       - name: Read issue title
         id: issue
@@ -1354,10 +1373,9 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                # An empty API-key variable still wins credential precedence and
-                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
-                # OpenRouter bearer-token path.
-                unset ANTHROPIC_API_KEY
+                # OpenRouter's Claude Code contract requires the API-key variable
+                # to be present but empty so the bearer token owns authentication.
+                export ANTHROPIC_API_KEY=""
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
