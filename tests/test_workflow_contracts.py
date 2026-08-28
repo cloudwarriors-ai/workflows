@@ -25,10 +25,21 @@ class OpenRouterCredentialContractTests(unittest.TestCase):
     def test_openrouter_credential_is_rejected_before_agent_execution(self):
         workflow = WORKFLOW.read_text()
 
-        self.assertIn("- name: Validate OpenRouter credential", workflow)
+        preflight = workflow.index("- name: Validate OpenRouter credential")
+        bearer_header = workflow.index(
+            '-H "Authorization: Bearer ${OPENROUTER_API_KEY}"', preflight
+        )
+        install_rlm = workflow.index("- name: Install RLM", bearer_header)
+        run_rlm = workflow.index(
+            "- name: Run RLM Codebase Analysis", install_rlm
+        )
+
         self.assertIn("https://openrouter.ai/api/v1/key", workflow)
         self.assertIn('--output /dev/null', workflow)
         self.assertIn('if [ "$status" != "200" ]; then', workflow)
+        self.assertLess(preflight, bearer_header)
+        self.assertLess(bearer_header, install_rlm)
+        self.assertLess(install_rlm, run_rlm)
 
     def test_claude_cli_version_is_pinned(self):
         workflow = WORKFLOW.read_text()
