@@ -670,7 +670,10 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                export ANTHROPIC_API_KEY=""
+                # An empty API-key variable still wins credential precedence and
+                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
+                # OpenRouter bearer-token path.
+                unset ANTHROPIC_API_KEY
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
@@ -842,7 +845,10 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                export ANTHROPIC_API_KEY=""
+                # An empty API-key variable still wins credential precedence and
+                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
+                # OpenRouter bearer-token path.
+                unset ANTHROPIC_API_KEY
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
@@ -1348,7 +1354,10 @@ jobs:
                   echo "::error::OPENROUTER_API_KEY is required when claude_provider=openrouter"
                   exit 1
                 fi
-                export ANTHROPIC_API_KEY=""
+                # An empty API-key variable still wins credential precedence and
+                # suppresses ANTHROPIC_AUTH_TOKEN. Remove it entirely for the
+                # OpenRouter bearer-token path.
+                unset ANTHROPIC_API_KEY
                 export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
                 export ANTHROPIC_BASE_URL="https://openrouter.ai/api"
                 requested="${requested:-$openrouter_default}"
