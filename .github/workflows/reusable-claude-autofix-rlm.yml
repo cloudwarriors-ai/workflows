@@ -102,6 +102,9 @@ on:
       already_fixed_reason:
         description: 'machine-readable reason for an already-fixed no-op result'
         value: ${{ jobs.claude-autofix.outputs.already_fixed_reason }}
+      max_turns_reached:
+        description: 'true only when the final writer or repair continuation exhausted its turn budget'
+        value: ${{ jobs.claude-autofix.outputs.max_turns_reached }}
 
 # Prevent concurrent runs on the same issue
 concurrency:

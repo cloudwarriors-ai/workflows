@@ -65,6 +65,22 @@ class OpenRouterCredentialContractTests(unittest.TestCase):
 
 
 class WriterRepairContractTests(unittest.TestCase):
+    def test_final_turn_exhaustion_is_exposed_to_trusted_callers(self):
+        workflow = WORKFLOW.read_text()
+
+        workflow_outputs = workflow.split("    outputs:", 1)[1].split(
+            "\n\n# Prevent concurrent runs", 1
+        )[0]
+        self.assertIn("max_turns_reached:", workflow_outputs)
+        self.assertIn(
+            "value: ${{ jobs.claude-autofix.outputs.max_turns_reached }}",
+            workflow_outputs,
+        )
+        self.assertIn(
+            "max_turns_reached: ${{ steps.fix.outputs.max_turns_reached }}",
+            workflow,
+        )
+
     def test_writer_enforces_trusted_validation_with_one_bounded_continuation(self):
         workflow = WORKFLOW.read_text()
         writer = workflow.split("  claude-autofix:", 1)[1].split(
