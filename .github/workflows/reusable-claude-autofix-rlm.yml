@@ -26,10 +26,15 @@ on:
         type: number
         default: 60
       writer_timeout_minutes:
-        description: 'Wall-clock budget (minutes) for the Claude writer job. The default matches the historical hardcoded 30; large multi-surface issues need more.'
+        description: 'Wall-clock budget (minutes) for Claude writer processes. The default matches the historical hardcoded 30; large multi-surface issues need more.'
         required: false
         type: number
         default: 30
+      writer_job_timeout_minutes:
+        description: 'Total writer-job budget, including dependency setup and trusted validation. Must leave bounded time beyond writer_timeout_minutes.'
+        required: false
+        type: number
+        default: 45
       repair_turns:
         description: 'Maximum turns for the single validation-feedback repair continuation'
         required: false
@@ -105,6 +110,12 @@ on:
       max_turns_reached:
         description: 'true only when the final writer or repair continuation exhausted its turn budget'
         value: ${{ jobs.claude-autofix.outputs.max_turns_reached }}
+      writer_timed_out:
+        description: 'true only when a bounded Claude writer process exhausted its wall-clock budget'
+        value: ${{ jobs.claude-autofix.outputs.writer_timed_out }}
+      retry_reason:
+        description: 'Trusted machine-readable reason when the patch is safe to regenerate automatically'
+        value: ${{ jobs.publish-autofix.outputs.retry_reason }}
 
 # Prevent concurrent runs on the same issue
 concurrency:
@@ -1203,15 +1214,17 @@ jobs:
     name: Claude Adversarial Auto-Fix
     needs: [issue-context, rlm-analysis, repo-context, scout, packet-synthesis]
     runs-on: ubuntu-latest
-    # Wall clock was the binding constraint on multi-surface issues (scopely
-    # #1418/#1426: writer killed at the old hardcoded 30 while turns were
-    # plentiful) — so the budget is caller-sized now.
-    timeout-minutes: ${{ inputs.writer_timeout_minutes }}
+    # Keep the Claude process budget separate from job setup and trusted
+    # validation. The process remains caller-bounded; this outer budget leaves
+    # a finite completion margin instead of killing validation at the writer
+    # deadline.
+    timeout-minutes: ${{ inputs.writer_job_timeout_minutes }}
     outputs:
       already_fixed: ${{ steps.fix.outputs.already_fixed }}
       already_fixed_reason: ${{ steps.fix.outputs.already_fixed_reason }}
       has_changes: ${{ steps.fix.outputs.has_changes }}
       max_turns_reached: ${{ steps.fix.outputs.max_turns_reached }}
+      writer_timed_out: ${{ steps.fix.outputs.writer_timed_out }}
       claude_exit_code: ${{ steps.fix.outputs.claude_exit_code }}
       base_sha: ${{ steps.base.outputs.sha }}
     permissions:
@@ -1732,6 +1745,11 @@ jobs:
           echo "already_fixed=$ALREADY_FIXED" >> "$GITHUB_OUTPUT"
           echo "already_fixed_reason=$ALREADY_FIXED_REASON" >> "$GITHUB_OUTPUT"
           echo "max_turns_reached=$MAX_TURNS_REACHED" >> "$GITHUB_OUTPUT"
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            echo "writer_timed_out=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "writer_timed_out=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "claude_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
           echo "repair_attempted=$REPAIR_ATTEMPTED" >> "$GITHUB_OUTPUT"
           echo "validation_passed=$VALIDATION_PASSED" >> "$GITHUB_OUTPUT"
@@ -2016,6 +2034,8 @@ jobs:
     permissions:
       contents: write
       issues: write
+    outputs:
+      retry_reason: ${{ steps.commit.outputs.retry_reason }}
     steps:
       - name: Checkout trusted base
         uses: actions/checkout@v4
@@ -2039,11 +2059,16 @@ jobs:
           set -euo pipefail
           BRANCH_NAME="${{ inputs.head }}"
           ACTUAL_BASE_SHA=$(git rev-parse HEAD)
-          if ! [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
-             [ "$ACTUAL_BASE_SHA" != "$EXPECTED_BASE_SHA" ]; then
+          if ! [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Writer base SHA is not a full commit SHA"
+            exit 1
+          fi
+          if [ "$ACTUAL_BASE_SHA" != "$EXPECTED_BASE_SHA" ]; then
+            echo "retry_reason=base-drift" >> "$GITHUB_OUTPUT"
             echo "::error::Base branch changed after the writer ran; refusing to publish an unverified patch"
             exit 1
           fi
+          echo "retry_reason=" >> "$GITHUB_OUTPUT"
           if ! git check-ref-format "refs/heads/${BRANCH_NAME}"; then
             echo "::error::Invalid autofix branch name"
             exit 1
