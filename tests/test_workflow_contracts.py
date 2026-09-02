@@ -81,6 +81,44 @@ class WriterRepairContractTests(unittest.TestCase):
             workflow,
         )
 
+    def test_writer_timeout_and_base_drift_are_exposed_as_trusted_retry_signals(self):
+        workflow = WORKFLOW.read_text()
+        workflow_outputs = workflow.split("    outputs:", 1)[1].split(
+            "\n\n# Prevent concurrent runs", 1
+        )[0]
+        writer = workflow.split("  claude-autofix:", 1)[1].split(
+            "\n  publish-autofix:", 1
+        )[0]
+        publisher = workflow.split("  publish-autofix:", 1)[1].split(
+            "\n  # Backstop for the lock", 1
+        )[0]
+
+        self.assertIn("writer_timed_out:", workflow_outputs)
+        self.assertIn("retry_reason:", workflow_outputs)
+        self.assertIn(
+            "writer_timed_out: ${{ steps.fix.outputs.writer_timed_out }}",
+            writer,
+        )
+        self.assertIn('if [ "$EXIT_CODE" -eq 124 ]; then', writer)
+        self.assertIn("retry_reason: ${{ steps.commit.outputs.retry_reason }}", publisher)
+        self.assertIn('echo "retry_reason=base-drift"', publisher)
+
+    def test_writer_job_keeps_bounded_validation_margin(self):
+        workflow = WORKFLOW.read_text()
+        writer = workflow.split("  claude-autofix:", 1)[1].split(
+            "\n  publish-autofix:", 1
+        )[0]
+
+        self.assertIn("writer_job_timeout_minutes:", workflow)
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.writer_job_timeout_minutes }}",
+            writer,
+        )
+        self.assertNotIn(
+            "timeout-minutes: ${{ inputs.writer_timeout_minutes }}",
+            writer,
+        )
+
     def test_writer_enforces_trusted_validation_with_one_bounded_continuation(self):
         workflow = WORKFLOW.read_text()
         writer = workflow.split("  claude-autofix:", 1)[1].split(
