@@ -15,6 +15,11 @@ on:
         description: 'Base branch to target (e.g. new_dev or main)'
         required: true
         type: string
+      review_only:
+        description: 'MACD only: publish a new issue branch with a normal push for human review'
+        required: false
+        type: boolean
+        default: false
       max_rlm_cost:
         description: 'Maximum cost for RLM analysis in USD'
         required: false
@@ -2037,6 +2042,26 @@ jobs:
     outputs:
       retry_reason: ${{ steps.commit.outputs.retry_reason }}
     steps:
+      - name: Authorize reviewed publication
+        env:
+          REVIEW_ONLY: ${{ inputs.review_only }}
+          BASE: ${{ inputs.base }}
+          HEAD: ${{ inputs.head }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          if [ "$REVIEW_ONLY" = "true" ]; then
+            test "$GITHUB_REPOSITORY" = "cloudwarriors-ai/macd_agent"
+            test "$BASE" = "main"
+            test "$ISSUE_NUM" -gt 0
+            test "${ISSUE_NUM#0}" = "$ISSUE_NUM"
+            test "$HEAD" = "autofix/issue-${ISSUE_NUM}"
+          elif [ "$GITHUB_REPOSITORY" = "cloudwarriors-ai/macd_agent" ]; then
+            echo "::error::MACD requires reviewed publication"
+            exit 1
+          fi
+
       - name: Checkout trusted base
         uses: actions/checkout@v4
         with:
@@ -2099,6 +2124,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ steps.commit.outputs.sha }}
+          REVIEW_ONLY: ${{ inputs.review_only }}
         run: |
           set -euo pipefail
           BRANCH_NAME="${{ inputs.head }}"
@@ -2115,9 +2141,19 @@ jobs:
             exit 1
           fi
 
-          git -c core.hooksPath=/dev/null -c credential.helper= push "$REMOTE_URL" \
-            "${COMMIT_SHA}:refs/heads/${BRANCH_NAME}" \
-            "--force-with-lease=refs/heads/${BRANCH_NAME}:${REMOTE_SHA}"
+          export LC_ALL=C
+          if [ "$REVIEW_ONLY" = "true" ]; then
+            if [ -n "$REMOTE_SHA" ]; then
+              echo "::error::Review branch already exists; refusing automatic replacement"
+              exit 1
+            fi
+            git -c core.hooksPath=/dev/null -c credential.helper= push "$REMOTE_URL" \
+              "${COMMIT_SHA}:refs/heads/${BRANCH_NAME}"
+          else
+            git -c core.hooksPath=/dev/null -c credential.helper= push "$REMOTE_URL" \
+              "${COMMIT_SHA}:refs/heads/${BRANCH_NAME}" \
+              "--force-with-lease=refs/heads/${BRANCH_NAME}:${REMOTE_SHA}"
+          fi
 
       - name: Comment fix complete
         uses: actions/github-script@v7
